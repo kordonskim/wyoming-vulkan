@@ -22,7 +22,7 @@ Home Assistant                       Wyoming over TCP (JSON header line + option
 │         └─ CosyVoice3 → HTTP → cosyvoice-server (child process, own ggml) ┤ │     │
 │                                                  Vulkan loader ◄┴─────────┘     │
 │                                   Mesa (Intel) / NVIDIA drivers (listed ICD files) │
-└──────────────────────────────────────── /dev/dri/renderD128 (+ NVIDIA runtime) ─┘
+└──────────────────────────────────────── /dev/dri/renderD200 (+ NVIDIA runtime) ─┘
                                         kernel drivers (i915 / xe, nvidia) → GPUs
 ```
 
@@ -42,7 +42,7 @@ How the GPU reaches the container does not matter: bare metal, a whole GPU passe
 
 | Setting | Why |
 |---|---|
-| the GPU's render node as `/dev/dri/renderD128`, plus the host's `render` group | access to the GPU; with several GPUs, map it by PCI address (`/dev/dri/by-path/pci-…-render`) so a renumbering cannot hand over another card |
+| the GPU's render node as `/dev/dri/renderD200` (`RENDER_TARGET`), plus the host's `render` group | access to the GPU; with several GPUs, map it by PCI address (`/dev/dri/by-path/pci-…-render`) so a renumbering cannot hand over another card. The name inside the container is outside the kernel's `renderD128`–`191` because the NVIDIA runtime adds the NVIDIA card's nodes under their host names and would otherwise replace it (seen on Ubuntu 26.04, where the two cards' numbers change between boots); drivers find the device by its device number, not the name |
 | `VK_DRIVER_FILES` / `VK_ICD_FILENAMES` = Intel's and NVIDIA's driver files (set in the image) | hides `llvmpipe` (software Vulkan on the CPU) and the other drivers; NVIDIA's file exists only with the NVIDIA runtime (§7). With no existing file there is no Vulkan device and ONNX Runtime silently runs on the CPU, which the server detects (§5) |
 | models and voices mounted read-only | the image contains no models |
 | non-root user | only needs to read the model and voice folders |

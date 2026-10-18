@@ -81,7 +81,8 @@ cp deploy/.env.example deploy/.env
 ```
 
 Edit `deploy/.env`: at least `RENDER_GID` (`getent group render`), `RENDER_DEVICE` if the GPU is not
-`/dev/dri/renderD128`, and `PUID`/`PGID` (a user that can read the data folder). `DATA_DIR` (default
+`/dev/dri/renderD128` (with two GPUs prefer the stable `/dev/dri/by-path/pci-…-render` name: render node numbers can
+change between boots), and `PUID`/`PGID` (a user that can read the data folder). `DATA_DIR` (default
 `deploy/data`) holds `models/<engine>/` and `voices/` (your own Piper voices); it can be a network share. Then:
 
 ```bash
@@ -156,7 +157,9 @@ on the CPU); a listed file that is not in the container is skipped. For an AMD G
 `DOCKER_RUNTIME=nvidia` and `NVIDIA_VISIBLE_DEVICES` (`all`, an index or the GPU's UUID from `nvidia-smi -L`) in
 `.env`. The compose file adds the `graphics` capability, which brings NVIDIA's Vulkan driver file into the container
 (`--gpus all` alone does not). If the NVIDIA runtime cannot start (driver update, toolkit problem), the whole
-container does not start, including the engines on another GPU.
+container does not start, including the engines on another GPU. The runtime adds the NVIDIA card's render nodes
+under their host names, which is why the other GPU is mapped as `RENDER_TARGET=/dev/dri/renderD200` (outside the
+kernel's `renderD128`–`191`): mapped as `renderD128`, it would be replaced whenever the NVIDIA card gets that number.
 
 ### Several GPUs
 
@@ -180,6 +183,8 @@ and where each engine runs, and Home Assistant shows it: `CosyVoice zh_female [N
 | `no ggml GPU device contains 'Intel'` | no Vulkan GPU in the container: render node not mapped, wrong `RENDER_GID`, or no Mesa driver for this GPU |
 | `ONNX Runtime session providers are ['CPUExecutionProvider'], not WebGPU` | ONNX Runtime found no Vulkan device (the silent CPU fallback it would otherwise do) |
 | `no Vulkan driver file of … exists` | wrong `VK_DRIVER_FILES` path (a missing NVIDIA file alone is fine: it is only there with the NVIDIA runtime) |
+| `GPU unavailable` / `[CPU fallback]` only since the NVIDIA runtime is on (or since a host upgrade) | the NVIDIA card's render node replaced the one mapped for the other GPU: keep `RENDER_TARGET` outside `renderD128`–`191` (default `renderD200`) |
+| Vulkan `DeviceLost`, the container restarting (Intel Xe_LP iGPU as an SR-IOV virtual function) | GPU hang in compute jobs: the host's i915 SR-IOV driver setting for the compute engine (CCS) does not match; check it on the host |
 | `tts library … (optional): … not offered` | an optional voice folder is missing or not answering |
 
 ## Project layout

@@ -32,7 +32,7 @@ ARG APT_SNAPSHOT=20260928T000000Z
 RUN apt-get update --snapshot ${APT_SNAPSHOT} \
  && apt-get install -y --no-install-recommends \
       g++=4:13.2.0-7ubuntu1 g++-14=14.2.0-4ubuntu2~24.04.1 gcc-14=14.2.0-4ubuntu2~24.04.1 \
-      ninja-build=1.11.1-2 git=1:2.43.0-1ubuntu7.3 ca-certificates=20260601~24.04.1 curl=8.5.0-2ubuntu10.15 \
+      ninja-build=1.11.1-2 git=1:2.43.0-1ubuntu7.3 ca-certificates=20260601~24.04.1 \
       libvulkan-dev=1.3.275.0-1build1 glslc=2023.8-1build1 spirv-headers=1.6.1+1.4.309.0-1~ubuntu0.24.04.2 \
       libicu-dev=74.2-1ubuntu3.1 pkg-config=1.8.1-2build1 \
  && rm -rf /var/lib/apt/lists/*
@@ -47,7 +47,8 @@ RUN git init -q cosyvoice && cd cosyvoice \
  && git submodule update -q --init --depth 1 vendor/pcre2 \
  && git init -q vendor/ggml && git -C vendor/ggml fetch -q --depth 1 https://github.com/ggml-org/ggml.git ${GGML_COMMIT} \
  && git -C vendor/ggml checkout -q FETCH_HEAD \
- && curl -sSfL -o /tmp/ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz \
+ && python3 -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' \
+      https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz /tmp/ort.tgz \
  && echo "${ORT_SHA256}  /tmp/ort.tgz" | sha256sum -c - \
  && mkdir -p /opt/ort && tar xzf /tmp/ort.tgz -C /opt/ort --strip-components=1 && rm /tmp/ort.tgz
 # gcc 14 (C++20; its module support crashes on the server, hence PCH); no AVX10 tier (gcc 14 cannot build it);
