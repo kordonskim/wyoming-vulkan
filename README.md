@@ -15,6 +15,7 @@ Vulkan device initialization retain their existing behavior. HA tokens are suppl
 - `patches/series`: the ordered patches to apply.
 - `patches/0001-home-assistant-vocabulary.patch`: the HA feature, tests, configuration and documentation.
 - `scripts/prepare-source.py`: download upstream and apply the patch series to a new `.build/upstream` directory.
+- `scripts/fetch-models.sh`: deployment-compatible wrapper for the pinned upstream model downloader.
 - `.github/workflows/`: checks, tagged images, and proposed upstream revision updates.
 
 The pin makes a release reproducible. **Update from upstream** proposes the latest jdbridge main revision;
@@ -53,6 +54,35 @@ Generated source is ignored by Git. The HA instructions and complete deployment 
 `.build/upstream/README.md` and `.build/upstream/config/config.example.toml` after preparation.
 
 ## Deploy
+
+Existing init containers can continue cloning this repository and running `scripts/fetch-models.sh` directly.
+The wrapper downloads the model script from the revision in `upstream.json` and forwards all arguments; it does
+not need Python or a prepared source tree. It requires Bash, curl, sed and coreutils, matching the Alpine init
+container packages below. The downloader verifies model checksums and reuses already downloaded models.
+
+For the Parakeet, Medium and Large V3 Turbo models shown in the Kubernetes deployment, use this init container
+with the existing `data` volume. This downloads models only; it does not build or run the server image:
+
+```yaml
+initContainers:
+  - name: fetch-models
+    image: alpine:3.20
+    command: ["/bin/sh", "-ec"]
+    args:
+      - |
+        apk add --no-cache bash curl git coreutils ca-certificates
+        git clone --depth 1 https://github.com/kordonskim/wyoming-vulkan.git /tmp/wyoming-vulkan
+        bash /tmp/wyoming-vulkan/scripts/fetch-models.sh -d /data/models parakeet-q8_0 whisper-medium-q5_0 whisper-large-v3-turbo-q5_0
+        mkdir -p /data/voices
+    volumeMounts:
+      - name: data
+        mountPath: /data
+```
+
+Keep the application image pinned to your chosen release, such as
+`ghcr.io/kordonskim/wyoming-vulkan:v0.1.0`. The init container above clones main so it receives the restored wrapper;
+the historical `v0.1.0` Git tag predates that wrapper. For future releases containing the wrapper, clone the matching
+release tag with `git clone --branch vX.Y.Z --depth 1 ...` to keep the downloader pin aligned with the image.
 
 Use the prepared deployment files. Download the models and prepare your local environment:
 

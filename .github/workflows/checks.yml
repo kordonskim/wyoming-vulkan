@@ -16,6 +16,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check deployment model-download entry point
+        run: |
+          bash -n scripts/fetch-models.sh
+          bash scripts/fetch-models.sh --list > "$RUNNER_TEMP/wyoming-models.txt"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          names = {line.split()[0] for line in Path(os.environ["RUNNER_TEMP"], "wyoming-models.txt").read_text().splitlines() if line.strip()}
+          assert {"parakeet-q8_0", "whisper-medium-q5_0", "whisper-large-v3-turbo-q5_0"} <= names
+          PY
+
       - name: Download upstream and apply HA patches
         run: python3 scripts/prepare-source.py
 
