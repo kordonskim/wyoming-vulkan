@@ -1,0 +1,2 @@
+# Preserve exported patches byte-for-byte, including empty context lines.
+patches/*.patch -text whitespace=-blank-at-eol,-blank-at-eof

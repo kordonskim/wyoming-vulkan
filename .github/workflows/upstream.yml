@@ -17,45 +17,54 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout fork main
+      - name: Checkout build repository
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
 
-      - name: Merge upstream into a review branch and open a PR
+      - name: Propose a newer upstream revision after checking patch compatibility
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-          git remote add upstream https://github.com/jdbridge/wyoming-vulkan.git
-          git fetch upstream main --no-tags
-          if git merge-base --is-ancestor upstream/main HEAD; then
-            echo 'Already up to date with upstream.' >> "$GITHUB_STEP_SUMMARY"
+          revision=$(git ls-remote https://github.com/jdbridge/wyoming-vulkan.git refs/heads/main | awk '{print $1}')
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]] || { echo 'Cannot resolve upstream main'; exit 1; }
+          current=$(python3 -c 'import json; print(json.load(open("upstream.json"))["revision"])')
+          if [ "$current" = "$revision" ]; then
+            echo 'Already pinned to the current upstream main.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          pending=$(gh pr list --base main --state open --json headRefName --jq '[.[] | select(.headRefName | startswith("codex/upstream-sync-"))] | length')
+          pending=$(gh pr list --base main --state open --json headRefName --jq '[.[] | select(.headRefName | startswith("codex/upstream-"))] | length')
           if [ "$pending" -gt 0 ]; then
             echo 'An upstream update PR is already open. Merge or close it before retrying.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          branch="codex/upstream-sync-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # Check a clean upstream checkout, not the previous generated source.
+          python3 scripts/prepare-source.py --revision "$revision"
+          branch="codex/upstream-pin-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git switch -c "$branch"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if ! git merge --no-edit upstream/main; then
-            echo 'Upstream conflicts with fork changes. Resolve the merge locally; main has not changed.' >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
+          UPSTREAM_REVISION="$revision" python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          path = Path("upstream.json")
+          data = json.loads(path.read_text())
+          data["revision"] = os.environ["UPSTREAM_REVISION"]
+          path.write_text(json.dumps(data, indent=2) + "\n")
+          PY
+          git add upstream.json
+          git commit -m "Update jdbridge upstream source to $revision"
           git push origin "HEAD:refs/heads/$branch"
           cat > "$RUNNER_TEMP/upstream-pr.md" <<'BODY'
-          Merge the latest jdbridge/wyoming-vulkan main while preserving this fork's HA vocabulary support and image workflows.
+          Update the upstream source revision downloaded during Docker builds. The HA patch series applied cleanly to this candidate revision.
 
-          Review the changes and check the manually dispatched Checks run on this branch before merging. Merging into main triggers a tested Docker image build with latest and commit tags. Real Vulkan GPU testing still requires a GPU host.
+          Review the new upstream revision and the manually dispatched Checks run before merging. Checks download the candidate source, apply the patches, build the image, and run unit/protocol and ABI tests. Merging triggers tagged image publishing. Real Vulkan GPU testing still requires a GPU host.
           BODY
-          url=$(gh pr create --base main --head "$branch" --title 'Merge updates from jdbridge/wyoming-vulkan' --body-file "$RUNNER_TEMP/upstream-pr.md")
+          url=$(gh pr create --base main --head "$branch" --title 'Update jdbridge upstream source revision' --body-file "$RUNNER_TEMP/upstream-pr.md")
           echo "Update PR: $url" >> "$GITHUB_STEP_SUMMARY"
           # Explicit dispatch runs checks even when bot-created PR events require approval.
           gh workflow run checks.yml --ref "$branch"

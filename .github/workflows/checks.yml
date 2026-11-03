@@ -16,13 +16,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Download upstream and apply HA patches
+        run: python3 scripts/prepare-source.py
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Build test image
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: .build/upstream
           load: true
           tags: wyoming-vulkan:ci
           platforms: linux/amd64
@@ -30,11 +33,13 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Render deployment config
+        working-directory: .build/upstream
         run: |
           docker compose --env-file deploy/.env.example -f deploy/compose.yaml config --format json \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["configs"]["wyoming_vulkan_config"]["content"], end="")' > "$RUNNER_TEMP/wyoming-config.toml"
 
       - name: Unit and Wyoming protocol tests (no GPU or models required)
+        working-directory: .build/upstream
         run: |
           docker run --rm --entrypoint python \
             -v "$PWD/tests:/tests:ro" \
@@ -42,6 +47,7 @@ jobs:
             wyoming-vulkan:ci -m unittest discover -s /tests -p 'test_*.py'
 
       - name: Native binding ABI checks
+        working-directory: .build/upstream
         env:
           IMAGE: wyoming-vulkan:ci
         run: bash tests/check_abi.sh

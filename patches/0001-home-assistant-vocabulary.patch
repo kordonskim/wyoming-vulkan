@@ -1,0 +1,1521 @@
+diff --git a/.dockerignore b/.dockerignore
+new file mode 100644
+index 0000000..d9a74ce
+--- /dev/null
++++ b/.dockerignore
+@@ -0,0 +1,15 @@
++.git
++.uv-cache
++.venv
++venv
++**/__pycache__
++**/.env
++**/.env.*
++!**/.env.example
++**/secrets
++deploy/data
++data
++models
++voices
++voices-extra
++*.patch
+diff --git a/.gitignore b/.gitignore
+index 2db9a25..5558574 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -41,3 +41,7 @@ venv/
+ .vscode/
+ *.swp
+ .DS_Store
++
++# Local HA secrets and tooling cache
++secrets/
++.uv-cache/
+diff --git a/DESIGN.md b/DESIGN.md
+index 1e60e96..7f87b51 100644
+--- a/DESIGN.md
++++ b/DESIGN.md
+@@ -201,3 +201,20 @@ Each engine picks its GPU with `gpu = "intel" | "nvidia" | "amd" | "<part of the
+ **A pack with `device = "gpu"` whose GPU is missing** is not offered at all (warning), since it could only fail on first use.
+ 
+ **Measurements** on the Intel iGPU, the RTX 4060 and the CPU: `README.md` (Measurements).
++# Home Assistant vocabulary biasing
++
++`hass_api.py` reads conversation exposure, states and registries through the HA WebSocket API.
++Credentials are loaded separately from `Config` and passed only to the client; neither configuration nor
++diagnostics store the token. Error messages exclude server payloads and transport exception details.
++
++`name_cache.py` owns one background task and one last-good `RecognitionContext`, shared by the `Services`
++objects for every endpoint. Startup and audio events schedule refreshes; no transcription awaits them.
++The refresh interval applies to attempts, including failures. Successful empty snapshots remove old names;
++failures keep the previous snapshot. Shutdown cancels the task.
++
++The handler captures a snapshot before dispatching work to a thread. `SttEngine.transcribe_with_vocabulary`
++defaults to ordinary transcription, preserving Parakeet. Whisper overrides it and constructs a prompt under
++its existing context lock with `whisper_tokenize`, including the initial space added by whisper.cpp.
++Prompts are cached per snapshot, engine, budget and prefix. The budget includes the prefix and is bounded
++by both configuration and the model's text context. UTF-8 prompt bytes stay alive throughout `whisper_full`;
++the shared parameters' pointer is cleared in `finally`. GPU initialization and ctypes struct layouts are unchanged.
+diff --git a/README.md b/README.md
+index e9332c7..b8986dd 100644
+--- a/README.md
++++ b/README.md
+@@ -120,6 +120,94 @@ config when it runs without Compose.
+ Voice folders on network shares are fine: they are optional (a missing or hung share only removes its voices), and a
+ voice is offered only once its files have stopped changing.
+ 
++## Home Assistant vocabulary biasing
++
++Whisper can use conversation-exposed entity names, aliases, areas and floors as recognition context.
++This applies to every `whisper.cpp` model, including Medium and Large V3 Turbo. Parakeet continues to use its
++existing decoder. Vulkan device selection and Wyoming ports keep their existing settings.
++
++Create a Home Assistant long-lived access token from your HA profile. With Compose, save it in
++`DATA_DIR/secrets/ha-token`, readable by the container's `PUID`, and set these **nonsecret** values in `deploy/.env`:
++
++```dotenv
++HASS_API=http://homeassistant.local:8123/api
++HASS_TOKEN_FILE=/data/secrets/ha-token
++HASS_REFRESH_SECONDS=60
++HASS_TIMEOUT=10
++HASS_PROMPT_MAX_TOKENS=200
++```
++
++The file path is inside the container; `/data` is already mounted read-only. Use HTTPS when the network is
++untrusted. Keep the token file out of source control (the repository ignores `secrets/` and `deploy/data/`).
++The server never logs authentication payloads or HA error response bodies. Tokens are not included in diagnostic
++configuration. Do not put a token in TOML, `.env`, a command, or a bug report. A Docker secret mounted at
++`/run/secrets/ha_token` also works: point `HASS_TOKEN_FILE` there and attach the secret through your Compose override.
++
++Outside Compose, use `[hass]` in `config/config.example.toml`, with `token_file`, `WYOMING_HASS_TOKEN_FILE`,
++or the environment variable named by `token_env` (default `WYOMING_HASS_TOKEN`). File credentials take precedence
++over environment credentials. CLI overrides are `--hass-api`, `--hass-token-file`, `--hass-refresh-seconds`,
++`--hass-prompt-max-tokens`, and `--hass-timeout`. `--hass-token` is supported for compatibility with
++wyoming-faster-whisper, but exposes the token to process inspection; prefer the file option.
++Without credentials, HA fetching is disabled. Each Whisper `[[stt]]` may also set `initial_prompt = "Nanit, Ecobee."`
++as a static vocabulary prefix, with or without HA.
++
++One asynchronous cache serves all endpoints and Whisper models. It fetches at startup and schedules a refresh
++when audio arrives and the interval has elapsed; `0` refreshes on every utterance. Transcription never waits for
++HA: it uses the last successful snapshot, or only the static prefix before the first successful fetch. Failed,
++timed-out or malformed responses retain the previous snapshot and retry on subsequent utterances. `HASS_TIMEOUT`
++bounds the entire background fetch, including authentication and WebSocket reads.
++
++Names are normalized and deduplicated, then selected in this order: areas and floors containing exposed entities;
++entities in command-oriented domains (lights, switches, fans, media players, climate, scenes, to-do lists);
++remaining areas/floors; remaining exposed entities. Aliases follow their own name within each tier. Disabled
++entities and entities not exposed to conversation are excluded. Entity areas override device areas; floors
++inherit use from their areas. Friendly names take precedence over registry names.
++
++The prompt stops at the first name that exceeds the budget. Each model's native tokenizer counts the complete
++prompt, including punctuation and any static prefix. The default is 200 tokens, configurable from 1 to 223 and
++also capped below half the model's text context. An oversized static prefix is rejected at startup. Vocabulary
++biasing can improve recognition of unusual names, but can also encourage hallucinations; reduce the budget if needed.
++
++To offer **Medium and Large V3 Turbo simultaneously**, download both:
++
++```bash
++scripts/fetch-models.sh -d deploy/data/models whisper-medium-q5_0 whisper-large-v3-turbo-q5_0
++```
++
++Append these blocks to the inline TOML config in `deploy/compose.yaml`, and publish ports `10313:10313` and
++`10314:10314` in the service's `ports` list. Existing Parakeet and Whisper endpoints remain available.
++
++```toml
++[[stt]]
++name = "whisper-medium"
++backend = "whisper.cpp"
++model = "/data/models/whisper/ggml-medium-q5_0.bin"
++device = "gpu"
++languages = "auto"
++description = "Whisper Medium"
++audio_ctx = 0
++
++[[stt]]
++name = "whisper-turbo"
++backend = "whisper.cpp"
++model = "/data/models/whisper/ggml-large-v3-turbo-q5_0.bin"
++device = "gpu"
++languages = "auto"
++description = "Whisper Large V3 Turbo"
++audio_ctx = 0
++
++[[endpoint]]
++uri = "tcp://0.0.0.0:10313"
++stt = ["whisper-medium"]
++
++[[endpoint]]
++uri = "tcp://0.0.0.0:10314"
++stt = ["whisper-turbo"]
++```
++
++Add each port as a Wyoming integration in HA. Both models share the HA snapshot and build a separate token-budgeted
++prompt. `device = "gpu"` requires a usable Vulkan GPU; use `auto` if CPU fallback is desired.
++
+ ## Diagnostics page
+ 
+ `http://<docker host>:10312/` (`DIAG_PORT`; `web_port = 0` in the inline config turns it off). No authentication:
+diff --git a/config/config.example.toml b/config/config.example.toml
+index a234a6f..ea9ea89 100644
+--- a/config/config.example.toml
++++ b/config/config.example.toml
+@@ -7,6 +7,14 @@ samples_per_chunk = 1024         # size of the audio-chunk events sent back (as
+ max_audio_seconds = 60           # STT input beyond this is dropped
+ max_warm_models = 1              # TTS models kept loaded, each in its own process (least recently used is stopped)
+ 
++[hass]                           # optional vocabulary biasing for every Whisper model; no token = disabled
++api = "http://homeassistant.local:8123/api"
++token_env = "WYOMING_HASS_TOKEN"  # name of an environment variable, never the token itself
++token_file = ""                  # or WYOMING_HASS_TOKEN_FILE; file takes precedence over environment token
++refresh_seconds = 60             # minimum between background attempts; 0 = refresh on each utterance
++timeout = 10                     # complete background fetch timeout; transcription never waits
++prompt_max_tokens = 200           # 1..223, includes the optional static initial_prompt
++
+ [gpu]                            # how the GPU is recognised (Intel shown)
+ name_contains = "Intel"          # in the ggml / Vulkan device description, e.g. "Intel(R) Graphics (ADL-N)"
+ vendor_id = 0x8086               # PCI vendor of the ONNX Runtime WebGPU EP device
+@@ -36,6 +44,7 @@ threads = 4                      # backend option: CPU threads
+ # audio_ctx = 512                 # encoder window in 20 ms frames: 512 = ~10 s, ~3x faster; 0 = full 30 s
+ # threads = 4
+ # max_seconds = 15                # time budget per request (repetition loops are cut off)
++# initial_prompt = ""             # optional static vocabulary prefix, also works without HA
+ #
+ # HA makes one STT entity per port and never picks a model, so every STT choice that should be selectable in HA
+ # gets its own endpoint (all share the loaded engines). On each endpoint a request goes to the first engine that
+diff --git a/deploy/.env.example b/deploy/.env.example
+index 8f09afd..7e9fbf9 100644
+--- a/deploy/.env.example
++++ b/deploy/.env.example
+@@ -86,3 +86,11 @@ COSYVOICE_STREAM=false
+ EXTRA_VOICES_DIR=./voices-extra
+ # Files in the extra folder changed less than this many seconds ago are skipped (still being written)
+ EXTRA_VOICES_MIN_AGE=60
++# Optional Home Assistant vocabulary biasing (Whisper only). Never put the token itself here.
++# Write the token to DATA_DIR/secrets/ha-token, readable by PUID; /data is already mounted read-only.
++HASS_API=http://homeassistant.local:8123/api
++HASS_TOKEN_FILE=
++# To enable: HASS_TOKEN_FILE=/data/secrets/ha-token (a path INSIDE the container).
++HASS_REFRESH_SECONDS=60
++HASS_TIMEOUT=10
++HASS_PROMPT_MAX_TOKENS=200
+diff --git a/deploy/compose.yaml b/deploy/compose.yaml
+index 8c044f8..862b0aa 100644
+--- a/deploy/compose.yaml
++++ b/deploy/compose.yaml
+@@ -17,6 +17,7 @@ services:
+     # "graphics" capability brings NVIDIA's Vulkan driver into the container. Then choose per engine with *_GPU below.
+     runtime: ${DOCKER_RUNTIME:-runc}
+     environment:
++      WYOMING_HASS_TOKEN_FILE: ${HASS_TOKEN_FILE:-}
+       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-}
+       NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
+     user: "${PUID:-1000}:${PGID:-1000}"   # must be able to read the model and voice folders
+@@ -72,6 +73,12 @@ configs:
+ 
+       # The default GPU (part of its Vulkan name); each engine can pick another with gpu = "intel" | "nvidia" |
+       # "amd" | "<part of the name>", and device = "gpu" | "cpu" | "auto" (GPU, else CPU with a warning).
++      [hass]
++      api = "${HASS_API:-http://homeassistant.local:8123/api}"
++      refresh_seconds = ${HASS_REFRESH_SECONDS:-60}
++      timeout = ${HASS_TIMEOUT:-10}
++      prompt_max_tokens = ${HASS_PROMPT_MAX_TOKENS:-200}
++
+       [gpu]
+       name_contains = "${GPU_NAME_CONTAINS:-Intel}"
+       vendor_id = ${GPU_VENDOR_ID:-0x8086}
+diff --git a/tests/test_hass.py b/tests/test_hass.py
+new file mode 100644
+index 0000000..d268c80
+--- /dev/null
++++ b/tests/test_hass.py
+@@ -0,0 +1,315 @@
++"""HA protocol, nonblocking refresh, token budgets and the native Whisper boundary."""
++
++import asyncio
++import os
++import tempfile
++import threading
++import unittest
++from pathlib import Path
++from unittest.mock import Mock, patch
++
++import numpy as np
++from aiohttp import web
++from aiohttp.test_utils import TestServer
++
++from wyoming_vulkan.config import ConfigError, EngineConfig, GpuConfig, HassConfig, load_config
++from wyoming_vulkan.engines.whisper_cpp import FullParams, WhisperEngine
++from wyoming_vulkan.hass_api import HomeAssistant, HomeAssistantError
++from wyoming_vulkan.name_cache import HassNameCache
++from wyoming_vulkan.vocabulary import RecognitionContext, clean_names
++
++
++class VocabularyTests(unittest.TestCase):
++    def test_priority_dedup_and_budget(self):
++        context = RecognitionContext([" Office ", "Upstairs"], ["Nanit", " Baby monitor "],
++                                     ["Garage"], ["Temperature", "office"])
++        self.assertEqual(context.whisper_prompt(len, 32), "Office, Upstairs, Nanit.")
++        self.assertEqual(context.all_names(), ["Office", "Upstairs", "Nanit", "Baby monitor", "Garage", "Temperature"])
++        self.assertEqual(clean_names([None, " A\0 B ", "a b", "\t"]), ["A B"])
++
++    def test_static_prefix_and_model_cache(self):
++        context = RecognitionContext(["Office"])
++        counter = Mock(side_effect=len)
++        self.assertEqual(context.whisper_prompt(counter, 40, "Vocabulary", "medium"), "Vocabulary. Office.")
++        calls = counter.call_count
++        context.whisper_prompt(counter, 40, "Vocabulary", "medium")
++        self.assertEqual(counter.call_count, calls)
++        context.whisper_prompt(counter, 40, "Vocabulary", "turbo")
++        self.assertGreater(counter.call_count, calls)
++        with self.assertRaises(ValueError):
++            context.whisper_prompt(len, 3, "too long")
++        self.assertIsNone(RecognitionContext().whisper_prompt(len))
++
++
++class ConfigTests(unittest.TestCase):
++    def test_bounds_and_safe_url_errors(self):
++        for kwargs in ({"timeout": 0}, {"refresh_seconds": -1}, {"timeout": float("nan")},
++                       {"prompt_max_tokens": 224}, {"prompt_max_tokens": True},
++                       {"api": "http://user:secret@ha/api"}, {"api": "http://ha/api?token=secret"}):
++            with self.subTest(kwargs=kwargs), self.assertRaises(ConfigError) as err:
++                HassConfig(**kwargs).validate()
++            self.assertNotIn("secret", str(err.exception))
++
++    def test_secret_file_precedence_and_no_config_secret(self):
++        with tempfile.TemporaryDirectory() as folder:
++            path = Path(folder) / "token"
++            path.write_text("test-secret\n", encoding="utf-8")
++            config = HassConfig(token_file=str(path))
++            with patch.dict(os.environ, {"WYOMING_HASS_TOKEN": "other"}):
++                self.assertEqual(config.read_token(), "test-secret")
++            self.assertNotIn("test-secret", repr(config))
++            path.unlink()
++            with self.assertRaisesRegex(ConfigError, "Cannot read HA token file"):
++                config.read_token()
++
++    def test_toml(self):
++        with tempfile.TemporaryDirectory() as folder:
++            path = Path(folder) / "config.toml"
++            path.write_text('[hass]\nprompt_max_tokens = 180\nrefresh_seconds = 0\n'
++                            '[[stt]]\nname="w"\nbackend="whisper.cpp"\nmodel="medium.bin"\n')
++            self.assertEqual(load_config(path).hass.prompt_max_tokens, 180)
++
++
++RESULTS = {
++    "homeassistant/expose_entity/list": {"exposed_entities": {
++        "light.lamp": {"conversation": True}, "switch.disabled": {"conversation": True},
++        "sensor.temp": {"conversation": True}, "light.private": {"conversation": False}}},
++    "get_states": [{"entity_id": "light.lamp", "attributes": {"friendly_name": "Office Lamp"}},
++                   {"entity_id": "light.private", "attributes": {"friendly_name": "Private"}}],
++    "config/entity_registry/get_entries": {
++        "light.lamp": {"name": "Lamp", "device_id": "device", "aliases": ["Desk Light"]},
++        "switch.disabled": {"name": "Disabled", "disabled_by": "user", "area_id": "empty"},
++        "sensor.temp": {"original_name": "Thermometer", "area_id": "office"}},
++    "config/device_registry/list": [{"id": "device", "area_id": "office"}],
++    "config/area_registry/list": [{"area_id": "office", "name": "Office", "aliases": ["Study"], "floor_id": "upper"},
++                                  {"area_id": "empty", "name": "Garage"}],
++    "config/floor_registry/list": [{"floor_id": "upper", "name": "Upstairs", "aliases": ["Top Floor"]}],
++}
++
++
++class ApiTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.seen = []
++        self.mode = "ok"
++        self.received_auth = None
++        async def handler(request):
++            ws = web.WebSocketResponse()
++            await ws.prepare(request)
++            await ws.send_json({"type": "auth_required"})
++            self.received_auth = await ws.receive_json()
++            if self.mode == "auth":
++                await ws.send_json({"type": "auth_invalid", "message": "test-secret"})
++                return ws
++            await ws.send_json({"type": "auth_ok"})
++            async for raw in ws:
++                import json
++                message = json.loads(raw.data)
++                self.seen.append(message)
++                await ws.send_json({"id": message["id"] + (1 if self.mode == "id" else 0),
++                                    "type": "result", "success": self.mode != "failure",
++                                    "result": RESULTS[message["type"]], "error": "test-secret"})
++            return ws
++        app = web.Application()
++        app.router.add_get("/api/websocket", handler)
++        self.server = TestServer(app)
++        await self.server.start_server()
++        self.client = HomeAssistant("test-secret", str(self.server.make_url("/api")), timeout=1)
++
++    async def asyncTearDown(self):
++        await self.server.close()
++
++    async def test_real_websocket_exposure_aliases_and_inherited_places(self):
++        context = await self.client.get_context()
++        self.assertEqual(self.received_auth, {"type": "auth", "access_token": "test-secret"})
++        self.assertEqual(context.used_areas, ["Office", "Study", "Upstairs", "Top Floor"])
++        self.assertEqual(context.priority_entities, ["Office Lamp", "Desk Light"])
++        self.assertEqual(context.empty_areas, ["Garage"])
++        self.assertEqual(context.other_entities, ["Thermometer"])
++        request = next(m for m in self.seen if m["type"] == "config/entity_registry/get_entries")
++        self.assertNotIn("light.private", request["entity_ids"])
++
++    async def test_errors_never_surface_server_payloads(self):
++        for mode in ("auth", "failure", "id"):
++            self.mode = mode
++            with self.subTest(mode=mode), self.assertRaises(HomeAssistantError) as err:
++                await self.client.get_context()
++            self.assertNotIn("test-secret", str(err.exception))
++
++    async def test_timeout_covers_websocket_receives(self):
++        async def slow(request):
++            ws = web.WebSocketResponse()
++            await ws.prepare(request)
++            await ws.receive()
++            return ws
++        app = web.Application()
++        app.router.add_get("/api/websocket", slow)
++        async with TestServer(app) as server:
++            client = HomeAssistant("test-secret", str(server.make_url("/api")), timeout=.03)
++            with self.assertRaises(HomeAssistantError):
++                await asyncio.wait_for(client.get_context(), .5)
++
++
++class CacheTests(unittest.IsolatedAsyncioTestCase):
++    async def test_successful_empty_snapshot_removes_old_names(self):
++        async def fetch():
++            return RecognitionContext()
++        cache = HassNameCache(Mock(get_context=fetch))
++        cache.context = RecognitionContext(["Removed Entity"])
++        cache.schedule_refresh()
++        await cache._task
++        self.assertFalse(cache.context)
++        await cache.close()
++
++    async def test_single_flight_stale_failure_recovery_and_shutdown(self):
++        gate = asyncio.Event()
++        calls = 0
++        fail = False
++        async def fetch():
++            nonlocal calls
++            calls += 1
++            await gate.wait()
++            if fail:
++                raise RuntimeError("test-secret")
++            return RecognitionContext(["Office"])
++        cache = HassNameCache(Mock(get_context=fetch), refresh_seconds=0)
++        for _ in range(10):
++            cache.schedule_refresh()
++        await asyncio.sleep(0)
++        self.assertEqual(calls, 1)
++        self.assertFalse(cache.context)  # immediately usable while fetch is unfinished
++        gate.set()
++        await cache._task
++        previous = cache.context
++        fail = True
++        with self.assertLogs("wyoming_vulkan.name_cache", level="WARNING") as logs:
++            cache.schedule_refresh()
++            await cache._task
++        self.assertNotIn("test-secret", str(logs.output))
++        self.assertIs(cache.context, previous)
++        fail = False
++        cache.schedule_refresh()
++        await cache._task
++        self.assertIs(cache.context, previous)  # unchanged snapshot keeps prompt memoization
++        gate.clear()
++        cache.schedule_refresh()
++        await asyncio.sleep(0)
++        await cache.close()
++        self.assertTrue(cache._task.cancelled())
++
++    async def test_throttle_failure_and_success(self):
++        async def fetch():
++            raise HomeAssistantError("unavailable")
++        cache = HassNameCache(Mock(get_context=fetch), refresh_seconds=60)
++        cache.schedule_refresh()
++        await cache._task
++        previous = cache._task
++        cache.schedule_refresh()
++        self.assertIs(cache._task, previous)
++        await cache.close()
++
++
++class WhisperTests(unittest.TestCase):
++    def test_native_tokenizer_counts_utf8_space_and_model_cap(self):
++        engine = WhisperEngine(EngineConfig("stt", "w", "whisper.cpp", Path("medium.bin")), GpuConfig())
++        engine.ctx = 1
++        engine.prompt_max_tokens = 8
++        lib = Mock()
++        lib.whisper_tokenize.side_effect = lambda ctx, data, tokens, capacity: -len(data)
++        with patch("wyoming_vulkan.engines.whisper_cpp._lib", return_value=lib):
++            self.assertEqual(engine._prompt(RecognitionContext(["Étage", "Nanit"]), 200), "Étage.")
++            self.assertEqual(lib.whisper_tokenize.call_args.args[1], " Étage, Nanit.".encode())
++            engine.config.options["initial_prompt"] = "Oversized prefix"
++            with self.assertRaises(ValueError):
++                engine._prompt(RecognitionContext(), 200)
++        engine.ctx = None
++
++    def test_medium_and_turbo_native_prompt_and_cleanup(self):
++        for model in ("ggml-medium-q5_0.bin", "ggml-large-v3-turbo-q5_0.bin"):
++            for rc in (0, -1):
++                with self.subTest(model=model, rc=rc):
++                    engine = WhisperEngine(EngineConfig("stt", model, "whisper.cpp", Path(model)), GpuConfig())
++                    engine.ctx = 1
++                    engine.params = FullParams()
++                    engine.lock = threading.Lock()
++                    engine.audio_ctx = 0
++                    engine.max_seconds = None
++                    engine.prompt_max_tokens = 223
++                    engine.multilingual = False
++                    engine._empty_vocabulary = RecognitionContext()
++                    lib = Mock()
++                    lib.whisper_tokenize.side_effect = lambda ctx, data, tokens, capacity: -len(data.decode())
++                    observed = []
++                    def full(ctx, params, samples, length):
++                        observed.append(params.initial_prompt)
++                        return rc
++                    lib.whisper_full.side_effect = full
++                    lib.whisper_full_n_segments.return_value = 0
++                    with patch("wyoming_vulkan.engines.whisper_cpp._lib", return_value=lib):
++                        if rc:
++                            with self.assertRaises(RuntimeError):
++                                engine.transcribe_with_vocabulary(np.zeros(1600), "en", RecognitionContext(["Étage", "Nanit"]), 200)
++                        else:
++                            engine.transcribe_with_vocabulary(np.zeros(1600), "en", RecognitionContext(["Étage", "Nanit"]), 200)
++                            engine.transcribe(np.zeros(1600), "en")
++                            self.assertIsNone(observed[-1])
++                    self.assertEqual(observed[0], "Étage, Nanit.".encode())
++                    self.assertIsNone(engine.params.initial_prompt)
++                    engine.ctx = None
++
++
++class ProtocolTests(unittest.IsolatedAsyncioTestCase):
++    async def test_shared_cache_never_blocks_whisper_or_parakeet_endpoints(self):
++        from functools import partial
++        from wyoming.asr import Transcript
++        from wyoming.audio import AudioChunk, AudioStart, AudioStop
++        from wyoming.client import AsyncTcpClient
++        from wyoming.server import AsyncTcpServer
++        from wyoming_vulkan.config import ServerConfig
++        from wyoming_vulkan.handler import Services, WyomingHandler
++        from test_units import FakeStt, free_port
++
++        gate = asyncio.Event()
++        calls = 0
++        async def fetch():
++            nonlocal calls
++            calls += 1
++            await gate.wait()
++            return RecognitionContext(["New Name"])
++        names = HassNameCache(Mock(get_context=fetch))
++        names.context = RecognitionContext(["Cached Name"])
++        engines = [FakeStt("medium"), FakeStt("turbo"), FakeStt("parakeet")]
++        observed = []
++        for engine in engines[:2]:
++            def transcribe(audio, language, context, budget, engine=engine):
++                observed.append((engine.name, context.all_names(), budget))
++                return "heard"
++            engine.transcribe_with_vocabulary = transcribe
++        servers = []
++        ports = []
++        try:
++            for engine in engines:
++                port = free_port()
++                server = AsyncTcpServer("127.0.0.1", port)
++                await server.start(partial(WyomingHandler, Services(ServerConfig(), [engine], None, names=names)))
++                servers.append(server)
++                ports.append(port)
++            async def request(port):
++                async with AsyncTcpClient("127.0.0.1", port) as client:
++                    await client.write_event(AudioStart(rate=16000, width=2, channels=1).event())
++                    await client.write_event(AudioChunk(audio=b"\0\0" * 1600, rate=16000, width=2, channels=1).event())
++                    await client.write_event(AudioStop().event())
++                    event = await asyncio.wait_for(client.read_event(), 1)
++                    self.assertTrue(Transcript.is_type(event.type))
++            await asyncio.gather(*(request(port) for port in ports))
++            self.assertEqual(calls, 1)
++            self.assertFalse(gate.is_set())
++            self.assertCountEqual(observed, [("medium", ["Cached Name"], 200), ("turbo", ["Cached Name"], 200)])
++            self.assertEqual(len(engines[2].calls), 1)
++        finally:
++            for server in servers:
++                await server.stop()
++            await names.close()
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/third_party/LICENSE.ha-vocabulary b/third_party/LICENSE.ha-vocabulary
+new file mode 100644
+index 0000000..6bdecf6
+--- /dev/null
++++ b/third_party/LICENSE.ha-vocabulary
+@@ -0,0 +1,21 @@
++MIT License
++
++Copyright (c) 2025 Michael Hansen
++
++Permission is hereby granted, free of charge, to any person obtaining a copy
++of this software and associated documentation files (the "Software"), to deal
++in the Software without restriction, including without limitation the rights
++to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++copies of the Software, and to permit persons to whom the Software is
++furnished to do so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.
+diff --git a/third_party/README.md b/third_party/README.md
+index 86565df..cba75d8 100644
+--- a/third_party/README.md
++++ b/third_party/README.md
+@@ -2,3 +2,8 @@ C headers of whisper.cpp **v1.9.4** (commit 927cfce34f31707e17f2bff35c349632fb9e
+ base image: `parakeet.h`, `whisper.h` and `ggml/*.h` from https://github.com/ggml-org/whisper.cpp (MIT licence, see
+ `LICENSE.whisper.cpp`). They are not compiled into the server; the ctypes bindings in `wyoming_vulkan/engines/` mirror
+ their structs, and `tests/check_abi.sh` compiles a layout check against them.
++
++`wyoming_vulkan/hass_api.py` and `wyoming_vulkan/vocabulary.py` are adapted from
++OHF-Voice/wyoming-faster-whisper (MIT; `LICENSE.ha-vocabulary`). The Vulkan integration and nonblocking cache
++use this project's engine and endpoint interfaces.
++Reference checkout: `b03d4e40cf47e67969fe798b8149b62267db0711`.
+diff --git a/wyoming_vulkan/__main__.py b/wyoming_vulkan/__main__.py
+index 3616d1f..c5838f6 100644
+--- a/wyoming_vulkan/__main__.py
++++ b/wyoming_vulkan/__main__.py
+@@ -39,6 +39,12 @@ async def main() -> int:
+     parser.add_argument("--uri", help="override [server] uri, e.g. tcp://0.0.0.0:10310")
+     parser.add_argument("--device", choices=DEVICES, help="override the device of every engine")
+     parser.add_argument("--debug", action="store_true", help="debug logging, incl. ggml output")
++    parser.add_argument("--hass-api", help="override [hass] api URL")
++    parser.add_argument("--hass-token", help="HA access token; prefer WYOMING_HASS_TOKEN_FILE")
++    parser.add_argument("--hass-token-file", help="HA token file (preferred over command-line token)")
++    parser.add_argument("--hass-refresh-seconds", type=float)
++    parser.add_argument("--hass-prompt-max-tokens", type=int)
++    parser.add_argument("--hass-timeout", type=float, help="background HA fetch timeout; transcription never waits")
+     args = parser.parse_args()
+ 
+     logging.basicConfig(
+@@ -49,6 +55,14 @@ async def main() -> int:
+ 
+     try:
+         config = load_config(args.config)
++        for key in ("api", "token_file", "refresh_seconds", "prompt_max_tokens", "timeout"):
++            value = getattr(args, "hass_" + key)
++            if value is not None:
++                setattr(config.hass, key, value)
++        config.hass.validate()
++        token = (config.hass.read_token() if args.hass_token is None or config.hass.token_file
++                 else args.hass_token.strip())
++        args.hass_token = None
+     except (OSError, ConfigError) as err:
+         _LOGGER.error("Config %s: %s", args.config, err)
+         return 2
+@@ -57,6 +71,9 @@ async def main() -> int:
+     if args.device:
+         for e in config.stt + config.tts + config.tts_library + config.tts_pack:
+             e.device = "igpu" if args.device == "gpu" else args.device
++    for cfg in config.stt:
++        if cfg.backend == "whisper.cpp":
++            cfg.options["prompt_max_tokens"] = config.hass.prompt_max_tokens
+     for section, entries, kind in (("[[tts]]", config.tts, "tts"), ("[[tts_pack]]", config.tts_pack, "tts_pack")):
+         for e in entries:
+             if BACKENDS.get(e.backend, ("",))[0] != kind:
+@@ -123,12 +140,21 @@ async def main() -> int:
+         len(tts), len(library_names) - len(voices.pack_voices), len(config.tts_library), len(voices.pack_voices),
+         len(voices.packs), config.server.max_warm_models,
+     )
++    names = None
++    if token:
++        from .hass_api import HomeAssistant
++        from .name_cache import HassNameCache
++
++        names = HassNameCache(HomeAssistant(token, config.hass.api, config.hass.timeout), config.hass.refresh_seconds)
++        names.schedule_refresh()
++    token = None
+     # One Wyoming server per endpoint, all sharing the loaded engines (HA: one STT entity per endpoint)
+     by_name = {e.name: e for e in stt}
+     servers = []
+     for ep in config.endpoints:
+         ep_stt = [by_name[n] for n in ep.stt] if ep.stt is not None else list(stt)
+-        services = Services(server=config.server, stt=ep_stt, tts=voices if ep.tts else None, stt_name=ep.name)
++        services = Services(server=config.server, stt=ep_stt, tts=voices if ep.tts else None, stt_name=ep.name,
++                            names=names, prompt_max_tokens=config.hass.prompt_max_tokens)
+         servers.append((AsyncServer.from_uri(ep.uri), partial(WyomingHandler, services)))
+         _LOGGER.info(
+             "Endpoint %s: stt %s, tts %s", ep.uri, " > ".join(e.name for e in ep_stt) or "none",
+@@ -139,7 +165,11 @@ async def main() -> int:
+ 
+         await DiagnosticsWeb(config, stt, voices).start(config.server.web_host, config.server.web_port)
+     _LOGGER.info("Ready on %s after %.1f s", ", ".join(ep.uri for ep in config.endpoints), time.perf_counter() - started)
+-    await asyncio.gather(*(server.run(factory) for server, factory in servers))
++    try:
++        await asyncio.gather(*(server.run(factory) for server, factory in servers))
++    finally:
++        if names is not None:
++            await names.close()
+     return 0
+ 
+ 
+diff --git a/wyoming_vulkan/config.py b/wyoming_vulkan/config.py
+index ce8683d..c726d19 100644
+--- a/wyoming_vulkan/config.py
++++ b/wyoming_vulkan/config.py
+@@ -1,6 +1,8 @@
+ """TOML configuration: server, GPU recognition, STT and TTS engines, and folders of voices (TTS libraries)."""
+ 
+ import tomllib
++import math
++import os
+ from dataclasses import dataclass, field
+ from pathlib import Path
+ from typing import Any, Optional
+@@ -13,6 +15,43 @@ class ConfigError(ValueError):
+     pass
+ 
+ 
++@dataclass
++class HassConfig:
++    api: str = "http://homeassistant.local:8123/api"
++    token_env: str = "WYOMING_HASS_TOKEN"
++    token_file: str = ""
++    refresh_seconds: float = 60.0
++    timeout: float = 10.0
++    prompt_max_tokens: int = 200
++
++    def validate(self):
++        if (not isinstance(self.prompt_max_tokens, int) or isinstance(self.prompt_max_tokens, bool)
++                or not 1 <= self.prompt_max_tokens <= 223):
++            raise ConfigError("[hass]: prompt_max_tokens must be between 1 and 223")
++        for key, minimum in (("refresh_seconds", 0), ("timeout", 0)):
++            value = getattr(self, key)
++            if (not isinstance(value, (int, float)) or isinstance(value, bool)
++                    or not math.isfinite(value) or value < minimum or (key == "timeout" and value == 0)):
++                raise ConfigError(f"[hass]: invalid {key}")
++        if not all(isinstance(v, str) for v in (self.api, self.token_env, self.token_file)):
++            raise ConfigError("[hass]: api, token_env and token_file must be strings")
++        from .hass_api import HomeAssistant
++        try:
++            HomeAssistant("", self.api)
++        except ValueError:
++            raise ConfigError("[hass]: invalid API URL") from None
++
++    def read_token(self):
++        """Secrets are read at startup, never stored on the serializable config."""
++        path = self.token_file or os.environ.get("WYOMING_HASS_TOKEN_FILE", "")
++        if path:
++            try:
++                return Path(path).read_text(encoding="utf-8").strip()
++            except OSError:
++                raise ConfigError("Cannot read HA token file") from None
++        return os.environ.get(self.token_env, "").strip()
++
++
+ @dataclass
+ class ServerConfig:
+     uri: str = "tcp://0.0.0.0:10310"  # the main endpoint
+@@ -105,6 +144,7 @@ class Config:
+     endpoint: list[EndpointConfig] = field(default_factory=list)  # extra endpoints ([[endpoint]])
+     # speech settings by voice name, "*" = every voice: {"*": {"noise_w": 0.6}, "en_US-x-high": {"length_scale": 1.1}}
+     voice_settings: dict[str, dict[str, Any]] = field(default_factory=dict)
++    hass: HassConfig = field(default_factory=HassConfig)
+ 
+     def speech_options(self, voice: str, entry_options: dict[str, Any]) -> dict[str, Any]:
+         """A voice's engine options with its speech settings merged in. Precedence (last wins): [voice_settings."*"],
+@@ -152,6 +192,8 @@ def _languages(value) -> Optional[list[str]]:
+ 
+ def _engine(kind: str, i: int, data: dict) -> EngineConfig:
+     where = f"[[{kind}]] #{i + 1}"
++    if "initial_prompt" in data and not isinstance(data["initial_prompt"], str):
++        raise ConfigError(f"{where}: initial_prompt must be a string")
+     for key in ("name", "backend", "model"):
+         if not data.get(key):
+             raise ConfigError(f"{where}: '{key}' is required")
+@@ -218,7 +260,7 @@ def _endpoint(i: int, data: dict) -> EndpointConfig:
+ def load_config(path: Path) -> Config:
+     with open(path, "rb") as f:
+         raw = tomllib.load(f)
+-    unknown = set(raw) - {"server", "gpu", "stt", "tts", "tts_library", "tts_pack", "endpoint", "voice_settings"}
++    unknown = set(raw) - {"server", "gpu", "stt", "tts", "tts_library", "tts_pack", "endpoint", "voice_settings", "hass"}
+     if unknown:
+         raise ConfigError(f"unknown sections {sorted(unknown)}")
+     config = Config(
+@@ -230,7 +272,9 @@ def load_config(path: Path) -> Config:
+         tts_pack=[_engine("tts", i, {"device": "auto", **d}) for i, d in enumerate(raw.get("tts_pack", []))],
+         endpoint=[_endpoint(i, d) for i, d in enumerate(raw.get("endpoint", []))],
+         voice_settings=_voice_settings(raw.get("voice_settings", {})),
++        hass=_section(raw, "hass", HassConfig),
+     )
++    config.hass.validate()
+     if not (config.stt or config.tts or config.tts_library or config.tts_pack):
+         raise ConfigError("no [[stt]], [[tts]], [[tts_library]] or [[tts_pack]] configured")
+     for engines in (config.stt, config.tts, config.tts_pack):
+diff --git a/wyoming_vulkan/engines/base.py b/wyoming_vulkan/engines/base.py
+index 801867d..909c8c8 100644
+--- a/wyoming_vulkan/engines/base.py
++++ b/wyoming_vulkan/engines/base.py
+@@ -93,6 +93,10 @@ class Engine(ABC):
+ class SttEngine(Engine):
+     sample_rate = 16000
+ 
++    def transcribe_with_vocabulary(self, audio, language, context, max_tokens):
++        """Backends without prompt support retain their existing transcription behavior."""
++        return self.transcribe(audio, language)
++
+     @abstractmethod
+     def transcribe(self, audio: np.ndarray, language: Optional[str]) -> str:
+         """audio: float32 mono in [-1, 1] at self.sample_rate. Thread-safe (engines lock internally)."""
+diff --git a/wyoming_vulkan/engines/whisper_cpp.py b/wyoming_vulkan/engines/whisper_cpp.py
+index 403ef55..6d30a88 100644
+--- a/wyoming_vulkan/engines/whisper_cpp.py
++++ b/wyoming_vulkan/engines/whisper_cpp.py
+@@ -20,6 +20,8 @@ from typing import Optional
+ import numpy as np
+ 
+ from .. import devices
++from ..config import ConfigError
++from ..vocabulary import RecognitionContext
+ from . import ggml
+ from .base import GpuUnavailable, SttEngine
+ 
+@@ -154,6 +156,10 @@ def _lib() -> C.CDLL:
+         L.whisper_model_type_readable.argtypes = [C.c_void_p]
+         L.whisper_model_type_readable.restype = C.c_char_p
+         L.whisper_free.argtypes = [C.c_void_p]
++        L.whisper_tokenize.argtypes = [C.c_void_p, C.c_char_p, C.POINTER(C.c_int), C.c_int]
++        L.whisper_tokenize.restype = C.c_int
++        L.whisper_n_text_ctx.argtypes = [C.c_void_p]
++        L.whisper_n_text_ctx.restype = C.c_int
+         L.whisper_lang_max_id.restype = C.c_int
+         L.whisper_lang_str.argtypes = [C.c_int]
+         L.whisper_lang_str.restype = C.c_char_p
+@@ -242,6 +248,14 @@ class WhisperEngine(SttEngine):
+         self.audio_ctx = int(o.get("audio_ctx", 0))
+         self.fallback_language = o.get("language") or (None if self.multilingual else "en")
+         self.lock = threading.Lock()  # whisper_full is not thread-safe for one context
++        self._empty_vocabulary = RecognitionContext()
++        self.prompt_max_tokens = min(223, L.whisper_n_text_ctx(ctx) // 2 - 1)
++        # Validate the static prefix before accepting requests. Counting occurs under the context lock.
++        with self.lock:
++            try:
++                self._prompt(self._empty_vocabulary, self.config.options.get("prompt_max_tokens", 200))
++            except ValueError:
++                raise ConfigError("Whisper initial_prompt exceeds the configured token budget") from None
+         self.runtime.actual = device
+         _LOGGER.info(
+             "stt %s: loaded %s (%s, %s) on %s, audio_ctx %s",
+@@ -263,6 +277,21 @@ class WhisperEngine(SttEngine):
+         return self.fallback_language
+ 
+     def transcribe(self, audio: np.ndarray, language: Optional[str]) -> str:
++        return self.transcribe_with_vocabulary(
++            audio, language, self._empty_vocabulary, self.config.options.get("prompt_max_tokens", 200)
++        )
++
++    def _prompt(self, context, max_tokens):
++        def count(text):
++            # whisper.cpp prepends a space when tokenizing initial_prompt.
++            return abs(_lib().whisper_tokenize(self.ctx, (" " + text).encode("utf-8"), None, 0)) if text else 0
++
++        return context.whisper_prompt(
++            count, min(max_tokens, self.prompt_max_tokens),
++            prefix=self.config.options.get("initial_prompt"), tokenizer_key=str(id(self)),
++        )
++
++    def transcribe_with_vocabulary(self, audio, language, context, max_tokens):
+         assert self.ctx, "engine not loaded"
+         audio = np.ascontiguousarray(audio, dtype=np.float32)
+         L = _lib()
+@@ -273,6 +302,9 @@ class WhisperEngine(SttEngine):
+         budget = float(self.max_seconds) if self.max_seconds else max(15.0, 3 * seconds)
+         with self.lock:  # the params struct is shared, so it is filled in under the lock too
+             p = self.params
++            prompt = self._prompt(context, max_tokens)
++            prompt_bytes = prompt.encode("utf-8") if prompt else None
++            p.initial_prompt = prompt_bytes  # keep bytes alive until whisper_full returns
+             p.language = lang_bytes
+             p.detect_language = False  # True would only detect, not transcribe
+             p.audio_ctx = audio_ctx
+@@ -281,6 +313,7 @@ class WhisperEngine(SttEngine):
+                 rc = L.whisper_full(self.ctx, p, audio.ctypes.data_as(C.POINTER(C.c_float)), len(audio))
+             finally:
+                 self._deadline = float("inf")
++                p.initial_prompt = None
+             n = L.whisper_full_n_segments(self.ctx)
+             parts = [L.whisper_full_get_segment_text(self.ctx, i).decode("utf-8", "replace").strip() for i in range(n)]
+         if rc != 0:
+diff --git a/wyoming_vulkan/handler.py b/wyoming_vulkan/handler.py
+index 8c385d4..90a01c0 100644
+--- a/wyoming_vulkan/handler.py
++++ b/wyoming_vulkan/handler.py
+@@ -28,6 +28,7 @@ from .config import ServerConfig
+ from .engines.base import SttEngine, SynthesisOptions
+ from .info import build_info
+ from .voices import VoiceRegistry
++from .name_cache import HassNameCache
+ 
+ _LOGGER = logging.getLogger(__name__)
+ 
+@@ -40,6 +41,8 @@ class Services:
+     stt: list[SttEngine]  # this endpoint's engines, in routing order
+     tts: Optional[VoiceRegistry]  # None: this endpoint offers no voices
+     stt_name: Optional[str] = None  # program name for HA (default: the first engine's label)
++    names: Optional[HassNameCache] = None
++    prompt_max_tokens: int = 200
+ 
+     def stt_engine(self, name: Optional[str], language: Optional[str] = None) -> SttEngine:
+         """By name if given and known; else the first engine that supports the language; else the first engine."""
+@@ -115,6 +118,8 @@ class WyomingHandler(AsyncEventHandler):
+             return True
+         if AudioStart.is_type(event.type):
+             self._reset_audio()
++            if self.services.names is not None:
++                self.services.names.schedule_refresh()
+             return True
+         if AudioChunk.is_type(event.type):
+             self._add_audio(AudioChunk.from_event(event))
+@@ -188,7 +193,13 @@ class WyomingHandler(AsyncEventHandler):
+             return
+         pcm = np.frombuffer(b"".join(self._audio), dtype=np.int16).astype(np.float32) / 32768.0
+         t = time.perf_counter()
+-        text = await asyncio.to_thread(engine.transcribe, pcm, self._language)
++        if self.services.names is None:
++            text = await asyncio.to_thread(engine.transcribe, pcm, self._language)
++        else:
++            text = await asyncio.to_thread(
++                engine.transcribe_with_vocabulary, pcm, self._language,
++                self.services.names.context, self.services.prompt_max_tokens,
++            )
+         _LOGGER.info(
+             "stt %s: %.2f s audio -> %.3f s: %r", engine.name, len(pcm) / 16000, time.perf_counter() - t, text
+         )
+diff --git a/wyoming_vulkan/hass_api.py b/wyoming_vulkan/hass_api.py
+new file mode 100644
+index 0000000..f8dabeb
+--- /dev/null
++++ b/wyoming_vulkan/hass_api.py
+@@ -0,0 +1,337 @@
++"""Read the names in a Home Assistant install over the websocket API.
++
++Adapted from OHF-Voice/wyoming-faster-whisper; see third_party/LICENSE.ha-vocabulary.
++
++Read-only and recognition-only: this fetches the names a speaker can actually
++say -- exposed entities, the areas and floors they live in -- and never calls a
++service or handles an intent. The result is a
++[RecognitionContext](vocabulary.py) that biases speech-to-text.
++
++Only *conversation-exposed* entities are collected. Every entity in the house
++would put hundreds of names the speaker cannot mean into a prompt with room for
++a few dozen, crowding out the ones they can.
++
++Even so, an exposed home can overrun the prompt budget on its own, so the names
++are also sorted into the priority tiers of a
++[RecognitionContext](vocabulary.py): which area holds something exposed, and
++which domain an entity belongs to, are both known only here.
++
++Uses the project's existing aiohttp dependency.
++"""
++
++from __future__ import annotations
++
++import asyncio
++import logging
++from dataclasses import dataclass, field
++from typing import Any, Callable, Coroutine, Dict, Iterable, List, Optional, Set
++from urllib.parse import urlparse, urlunparse
++
++import aiohttp
++
++HASS_API_URL = "http://homeassistant.local:8123/api"
++from .vocabulary import RecognitionContext, clean_names
++
++_LOGGER = logging.getLogger(__name__)
++
++Command = Callable[[Dict[str, Any]], Coroutine[Any, Any, Dict[str, Any]]]
++
++# Domains whose entities get named out loud, and whose names are therefore the
++# ones worth spending prompt budget on. Everything else falls to a lower tier --
++# in practice that is mostly ``sensor``/``binary_sensor``, which a large home
++# exposes by the hundred and which are usually asked about by area ("what's the
++# temperature in the office") rather than by their own name.
++#
++# Membership is the whole heuristic; order within the set is irrelevant. Moving
++# a domain in or out of here is the one knob for tuning what survives
++# truncation.
++PRIORITY_DOMAINS = frozenset(
++    {
++        "light",
++        "switch",
++        "fan",
++        "media_player",
++        "climate",
++        "scene",
++        "todo",
++    }
++)
++
++
++@dataclass
++class _Entity:
++    """One exposed entity, reduced to what the tiers are decided from."""
++
++    entity_id: str
++    name: str = ""
++    aliases: List[str] = field(default_factory=list)
++    area_id: Optional[str] = None
++
++    @property
++    def domain(self) -> str:
++        return self.entity_id.split(".", 1)[0]
++
++    @property
++    def is_priority(self) -> bool:
++        return self.domain in PRIORITY_DOMAINS
++
++
++class HomeAssistantError(Exception):
++    """Home Assistant refused a request or the connection failed."""
++
++
++class HomeAssistant:
++    """Read-only client for the names speech-to-text biases toward."""
++
++    def __init__(
++        self,
++        token: str,
++        api_url: str = HASS_API_URL,
++        timeout: float = 10.0,
++    ) -> None:
++        self.token = token
++        self.api_url = api_url.rstrip("/")
++        self.timeout = timeout
++
++        parsed = urlparse(self.api_url)
++        if (parsed.scheme not in ("http", "https") or not parsed.hostname
++                or parsed.username or parsed.password or parsed.query or parsed.fragment):
++            raise ValueError("HA API requires an HTTP(S) URL without credentials, query or fragment")
++
++        scheme = "wss" if parsed.scheme == "https" else "ws"
++        self.websocket_api_url = urlunparse(
++            parsed._replace(
++                scheme=scheme,
++                path=f"{parsed.path}/websocket",
++                params="",
++                query="",
++                fragment="",
++            )
++        )
++
++    async def get_context(self) -> RecognitionContext:
++        """Fetch the current names. Raises HomeAssistantError on failure."""
++        current_id = 0
++
++        def next_id() -> int:
++            nonlocal current_id
++            current_id += 1
++            return current_id
++
++        try:
++            async with asyncio.timeout(self.timeout), aiohttp.ClientSession() as session:
++                async with session.ws_connect(
++                    self.websocket_api_url, max_msg_size=16 * 1024 * 1024
++                ) as websocket:
++
++                    async def command(payload: Dict[str, Any]) -> Dict[str, Any]:
++                        """One request, one reply. We subscribe to nothing, so
++                        nothing else can arrive in between."""
++                        request_id = next_id()
++                        await websocket.send_json({"id": request_id, **payload})
++                        msg = await websocket.receive_json()
++                        if (msg.get("id") != request_id or msg.get("type") != "result"
++                                or not msg.get("success")):
++                            raise HomeAssistantError("HA vocabulary request failed")
++
++                        return msg
++
++                    await self._authenticate(websocket)
++                    return await self._load(command)
++        except HomeAssistantError:
++            raise
++        except Exception:
++            # Responses and transport exceptions may contain secrets. Never surface them.
++            raise HomeAssistantError("HA vocabulary connection or response failed") from None
++
++    async def _authenticate(self, websocket: Any) -> None:
++        msg = await websocket.receive_json()
++        if msg.get("type") != "auth_required":
++            raise HomeAssistantError("HA authentication handshake failed")
++
++        await websocket.send_json({"type": "auth", "access_token": self.token})
++        msg = await websocket.receive_json()
++        if msg.get("type") != "auth_ok":
++            raise HomeAssistantError("HA authentication failed")
++
++    async def _load(self, command: Command) -> RecognitionContext:
++        # Entities the user exposed to conversation. Nothing else is a possible
++        # target of a voice command.
++        msg = await command({"type": "homeassistant/expose_entity/list"})
++        exposed: Set[str] = {
++            entity_id
++            for entity_id, info in (msg["result"]["exposed_entities"] or {}).items()
++            if info.get("conversation")
++        }
++
++        # The displayed (friendly) name is what Home Assistant itself matches and
++        # what a user reading their dashboard will say. The registry's
++        # name/original_name may have had the device prefix stripped, leaving
++        # "Blinds" where the entity shows as "Bedroom Blinds"; biasing toward
++        # that fragment would put a bare cover-class word into the prompt.
++        friendly: Dict[str, str] = {}
++        msg = await command({"type": "get_states"})
++        for state in msg["result"]:
++            entity_id = state["entity_id"]
++            if entity_id not in exposed:
++                continue
++
++            attributes = state.get("attributes") or {}
++            name = " ".join((attributes.get("friendly_name") or "").split())
++            if name:
++                friendly[entity_id] = name
++
++        # Aliases only come with the extended registry entries, so exposed
++        # entities are fetched a second time to get them. An alias is what a
++        # speaker actually says when the integration's own name is not it.
++        entries: Dict[str, Dict[str, Any]] = {}
++        if exposed:
++            msg = await command(
++                {
++                    "type": "config/entity_registry/get_entries",
++                    "entity_ids": sorted(exposed),
++                }
++            )
++            entries = {k: v for k, v in msg["result"].items() if v}
++
++        # An entity's area is usually its device's; only an explicit override
++        # lives on the entity itself. The device registry is the whole house, so
++        # it is only fetched when an exposed entity actually needs it.
++        device_areas: Dict[str, str] = {}
++        if any(
++            entry.get("device_id") and not entry.get("area_id")
++            for entry in entries.values()
++        ):
++            msg = await command({"type": "config/device_registry/list"})
++            device_areas = {
++                device["id"]: device["area_id"]
++                for device in msg["result"]
++                if device.get("id") and device.get("area_id")
++            }
++
++        entities: List[_Entity] = []
++        unnamed: List[str] = []
++        for entity_id in sorted(exposed):
++            entry = entries.get(entity_id) or {}
++            if entry.get("disabled_by") is not None:
++                # Disabled entities are gone from the home in every practical
++                # sense, including as evidence that their area is in use.
++                continue
++
++            name = friendly.get(entity_id) or entry.get("name") or ""
++            if not name:
++                name = entry.get("original_name") or ""
++
++            if not name:
++                # Still counts toward its area being in use: "turn off the
++                # office" reaches it even though it has no name to bias toward.
++                unnamed.append(entity_id)
++
++            entities.append(
++                _Entity(
++                    entity_id=entity_id,
++                    name=name,
++                    aliases=list(entry.get("aliases") or []),
++                    area_id=entry.get("area_id")
++                    or device_areas.get(entry.get("device_id") or ""),
++                )
++            )
++
++        msg = await command({"type": "config/area_registry/list"})
++        areas = list(msg["result"])
++
++        msg = await command({"type": "config/floor_registry/list"})
++        floors = list(msg["result"])
++
++        # An area earns the top tier by holding something the speaker can
++        # actually command; a floor earns it through such an area.
++        used_area_ids = {entity.area_id for entity in entities if entity.area_id}
++        used_floor_ids = {
++            area.get("floor_id")
++            for area in areas
++            if area.get("floor_id") and (area.get("area_id") in used_area_ids)
++        }
++
++        context = RecognitionContext(
++            used_areas=clean_names(
++                _place_names(areas, "area_id", used_area_ids, in_use=True),
++                _place_names(floors, "floor_id", used_floor_ids, in_use=True),
++            ),
++            priority_entities=clean_names(
++                _entity_names(entity for entity in entities if entity.is_priority)
++            ),
++            empty_areas=clean_names(
++                _place_names(areas, "area_id", used_area_ids, in_use=False),
++                _place_names(floors, "floor_id", used_floor_ids, in_use=False),
++            ),
++            other_entities=clean_names(
++                _entity_names(entity for entity in entities if not entity.is_priority)
++            ),
++        )
++        # One line per fetch: this runs once per utterance, so anything per-entity
++        # here would bury the rest of the log. Aliases are counted separately
++        # even though they are folded into the tiers, because "the alias I added
++        # is not in the prompt" is the question this log has to answer.
++        _LOGGER.debug(
++            "Loaded names from Home Assistant: %s areas in use, %s priority "
++            "entity names, %s empty areas, %s other entity names "
++            "(%s aliases included)%s",
++            len(context.used_areas),
++            len(context.priority_entities),
++            len(context.empty_areas),
++            len(context.other_entities),
++            sum(len(entity.aliases) for entity in entities),
++            (
++                f" (skipped {len(unnamed)} unnamed: {', '.join(unnamed)})"
++                if unnamed
++                else ""
++            ),
++        )
++        return context
++
++
++def _entity_names(entities: Iterable[_Entity]) -> List[str]:
++    """Each entity's name followed by its aliases.
++
++    Keeping aliases adjacent avoids pushing all aliases below every entity name.
++    The final prompt budget cuts at individual name boundaries.
++    """
++    names: List[str] = []
++    for entity in entities:
++        if entity.name:
++            names.append(entity.name)
++
++        # An unnamed entity can still have an alias, and that alias is then the
++        # only way to say it.
++        names.extend(entity.aliases)
++
++    return names
++
++
++def _place_names(
++    records: Iterable[Dict[str, Any]],
++    id_key: str,
++    used_ids: Set[Any],
++    in_use: bool,
++) -> List[str]:
++    """Names and aliases of the areas (or floors) on one side of ``used_ids``.
++
++    Registry order is kept, so the prompt is stable across fetches.
++    """
++    names: List[str] = []
++    for record in records:
++        if (record.get(id_key) in used_ids) != in_use:
++            continue
++
++        names.append(record.get("name") or "")
++        names.extend(record.get("aliases") or [])
++
++    return names
++
++
++__all__ = [
++    "HASS_API_URL",
++    "PRIORITY_DOMAINS",
++    "HomeAssistant",
++    "HomeAssistantError",
++]
+diff --git a/wyoming_vulkan/name_cache.py b/wyoming_vulkan/name_cache.py
+new file mode 100644
+index 0000000..4460e90
+--- /dev/null
++++ b/wyoming_vulkan/name_cache.py
+@@ -0,0 +1,53 @@
++"""One nonblocking HA vocabulary snapshot shared by every Wyoming endpoint."""
++
++import asyncio
++import logging
++import time
++from contextlib import suppress
++
++from .vocabulary import RecognitionContext
++
++_LOGGER = logging.getLogger(__name__)
++
++
++class HassNameCache:
++    def __init__(self, hass, refresh_seconds: float = 60.0):
++        self.hass = hass
++        self.refresh_seconds = refresh_seconds
++        self.context = RecognitionContext()
++        self._attempted = None
++        self._task = None
++        self._failed = False
++        self._closed = False
++
++    def schedule_refresh(self):
++        """Deduplicate concurrent requests; throttle failures as well as successes."""
++        if self._closed or (self._task is not None and not self._task.done()):
++            return
++        now = time.monotonic()
++        if self._attempted is not None and now - self._attempted < self.refresh_seconds:
++            return
++        self._attempted = now
++        self._task = asyncio.create_task(self._refresh())
++
++    async def _refresh(self):
++        try:
++            context = await self.hass.get_context()
++        except Exception:
++            # Do not log response bodies, exception text, credentials, URLs or vocabulary.
++            if not self._failed:
++                _LOGGER.warning("HA vocabulary refresh failed; retaining previous names")
++            self._failed = True
++            return
++        if self._failed:
++            _LOGGER.info("HA vocabulary refresh recovered")
++        self._failed = False
++        if context != self.context:
++            self.context = context
++
++    async def close(self):
++        self._closed = True
++        if self._task is not None:
++            self._task.cancel()
++            with suppress(asyncio.CancelledError):
++                await self._task
+diff --git a/wyoming_vulkan/vocabulary.py b/wyoming_vulkan/vocabulary.py
+new file mode 100644
+index 0000000..2db14b7
+--- /dev/null
++++ b/wyoming_vulkan/vocabulary.py
+@@ -0,0 +1,217 @@
++"""Turn Home Assistant names into a budgeted biasing prompt.
++
++Adapted from OHF-Voice/wyoming-faster-whisper; see third_party/LICENSE.ha-vocabulary.
++
++Whisper accepts an ``initial_prompt`` that conditions the decoder, and biasing it
++toward the names in the user's home is the cheapest accuracy win available: it
++takes proper nouns the model has never heard ("Ecobee", "Nanit") from garbage to
++correct without changing model, audio, or decode settings.
++
++The catch is size. Whisper's decoder context is 448 tokens and the prompt is
++hard-capped at ``max_length // 2 - 1`` == 223, past which it is silently
++truncated -- and quality degrades well before the cap, because a long prompt
++makes the model hallucinate and echo words that were never spoken. A house with
++200 exposed entities cannot be sent wholesale, so the names are placed in
++priority order and cut off at a budget:
++
++  1. areas and floors that hold an exposed entity -- few in number, spoken in
++     nearly every command ("turn on the *office* lamp"), and demonstrably real
++     targets, because something in them can actually be commanded
++  2. entity names in the domains a speaker names out loud -- lights, switches,
++     media players and the rest (see ``hass_api.PRIORITY_DOMAINS``). These are
++     the high-value proper nouns: the thing being turned on usually *is* the
++     name that gets misheard
++  3. the remaining areas and floors -- sayable, but with nothing exposed in them
++     there is no command they can complete
++  4. the remaining entity names -- in a big home mostly sensors, which are
++     hundreds in number and usually asked about by area ("the temperature in the
++     office") rather than by their own name
++
++Aliases are not a tier. An alias exists precisely because it is what the speaker
++says *instead of* the name the integration gave the thing, so it is at least as
++likely to be spoken as the name it replaces -- ranking every alias below every
++name drops the very words biasing exists to catch. Each one sits with the name
++it belongs to. Truncation is at name boundaries, so a name's aliases may be
++omitted when the budget runs out.
++
++Truncation is deliberate and deterministic: fill in that order, stop at the
++first name that would not fit, and log what was dropped. No scoring, no
++sampling -- the same home produces the same prompt every time.
++"""
++
++from __future__ import annotations
++
++import logging
++from dataclasses import dataclass, field
++from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
++
++_LOGGER = logging.getLogger(__name__)
++
++# Stay well under Whisper's hard cap of 223.
++DEFAULT_PROMPT_MAX_TOKENS = 200
++
++# Counts tokens in a candidate prompt using the model's own tokenizer.
++CountTokens = Callable[[str], int]
++
++# Punctuation that already separates a prefix from the name list.
++_PREFIX_ENDINGS = (".", ":", ",", ";", "!", "?")
++
++
++def estimate_tokens(text: str) -> int:
++    """Approximate a token count when the model's tokenizer is unavailable.
++
++    Deliberately an over-estimate. Going under means Whisper silently truncates
++    the prompt, which is worse than fitting fewer names than we could have.
++
++    Measured against Whisper's own BPE, a comma-joined list of realistic entity
++    names runs about 2.95 characters per token, so 2 leaves comfortable headroom.
++    This is only ever called on a whole candidate prompt, which is long; a very
++    short string on its own can still come in under (rare names are dense --
++    "Nanit" is 5 characters but 3 tokens), and that does not matter here.
++    """
++    return max(1, len(text) // 2)
++
++
++def clean_names(*groups: Iterable[Any]) -> List[str]:
++    """Merge name groups in order: strip, collapse whitespace, de-dupe.
++
++    De-duplication is case-insensitive and keeps the first spelling seen, so a
++    name that appears as both an area and an alias is only paid for once.
++    """
++    names: List[str] = []
++    seen = set()
++    for group in groups:
++        for value in group or ():
++            if not isinstance(value, str):
++                continue
++
++            name = " ".join(value.replace("\0", " ").split()).strip()
++            key = name.lower()
++            if name and (key not in seen):
++                seen.add(key)
++                names.append(name)
++
++    return names
++
++
++@dataclass
++class RecognitionContext:
++    """The names from one snapshot of Home Assistant, in priority order.
++
++    Each field is one tier of the order documented at the top of this module,
++    highest first; ``hass_api`` decides which name lands in which, and puts each
++    alias directly behind the name it belongs to. Floors are grouped with areas
++    -- they are the same kind of name to a speaker, and there are only ever a
++    handful of them.
++
++    A new snapshot is a new instance, so the prompt cache below dies with the
++    names it was built from.
++    """
++
++    # Areas and floors with at least one exposed entity in them.
++    used_areas: List[str] = field(default_factory=list)
++
++    # Entities in the domains a speaker names out loud.
++    priority_entities: List[str] = field(default_factory=list)
++
++    # Areas and floors with nothing exposed in them.
++    empty_areas: List[str] = field(default_factory=list)
++
++    # Every other exposed entity.
++    other_entities: List[str] = field(default_factory=list)
++
++    # Cached by (prefix, budget, tokenizer). Building the prompt costs one
++    # tokenizer call per name, and the same prompt is reused for every utterance
++    # until the names change.
++    _prompts: Dict[Tuple[str, int, str], Optional[str]] = field(
++        default_factory=dict, compare=False, repr=False
++    )
++
++    def all_names(self) -> List[str]:
++        """Every name in priority order, de-duped across the tiers."""
++        return clean_names(
++            self.used_areas,
++            self.priority_entities,
++            self.empty_areas,
++            self.other_entities,
++        )
++
++    def __bool__(self) -> bool:
++        return bool(
++            self.used_areas
++            or self.priority_entities
++            or self.empty_areas
++            or self.other_entities
++        )
++
++    def whisper_prompt(
++        self,
++        count_tokens: CountTokens,
++        max_tokens: int = DEFAULT_PROMPT_MAX_TOKENS,
++        prefix: Optional[str] = None,
++        tokenizer_key: str = "",
++    ) -> Optional[str]:
++        """A comma-joined prompt of as many names as fit within ``max_tokens``.
++
++        ``count_tokens`` should use the model's own tokenizer so the budget is
++        exact for that model; ``tokenizer_key`` identifies it for caching.
++        ``prefix`` is the server's configured ``--initial-prompt``, kept at the
++        front. A prefix exceeding the budget raises ValueError rather than
++        silently displacing the highest-priority vocabulary.
++
++        Returns None when there is nothing to send at all.
++        """
++        key = (prefix or "", max_tokens, tokenizer_key)
++        if key not in self._prompts:
++            self._prompts[key] = self._build_prompt(count_tokens, max_tokens, prefix)
++
++        return self._prompts[key]
++
++    def _build_prompt(
++        self,
++        count_tokens: CountTokens,
++        max_tokens: int,
++        prefix: Optional[str],
++    ) -> Optional[str]:
++        """Fill the budget in priority order, stopping at the first name that
++        does not fit."""
++        head = " ".join((prefix or "").replace("\0", " ").split())
++        if head and not head.endswith(_PREFIX_ENDINGS):
++            # So the prefix reads as its own sentence rather than running into
++            # the first name.
++            head += "."
++
++        if count_tokens(head) > max_tokens:
++            raise ValueError("initial_prompt exceeds the configured token budget")
++        names = self.all_names()
++        if not names:
++            return head or None
++
++        chosen: List[str] = []
++        for name in names:
++            candidate = _join(head, chosen + [name])
++            if count_tokens(candidate) > max_tokens:
++                break
++
++            chosen.append(name)
++
++        if len(chosen) < len(names):
++            _LOGGER.debug(
++                "Prompt budget of %s tokens fit %s/%s names; %s dropped",
++                max_tokens,
++                len(chosen),
++                len(names),
++                len(names) - len(chosen),
++            )
++
++        if not chosen:
++            # No discovered name fits after the budgeted prefix.
++            return head or None
++
++        return _join(head, chosen)
++
++
++def _join(head: str, names: List[str]) -> str:
++    """Render a prefix and a name list as the final prompt string."""
++    body = ", ".join(names) + "."
++    return f"{head} {body}" if head else body

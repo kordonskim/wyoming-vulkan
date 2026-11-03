@@ -45,3 +45,4 @@ venv/
 # Local HA secrets and tooling cache
 secrets/
 .uv-cache/
+.build/

@@ -1,78 +1,64 @@
-# Maintaining this fork
+# Maintaining the patch build
 
-This repository tracks `https://github.com/jdbridge/wyoming-vulkan` on `upstream/main`.
-Fork-specific commits add HA vocabulary biasing and GitHub image/update workflows. Keep new features in
-separate commits so they remain easy to review when upstream changes.
+This repository contains a pinned upstream revision, a patch series and build workflows. The original full
+source remains in Git history; current builds download jdbridge's source afresh. No force-sync or upstream
+merge is needed. Existing repository URLs, image package names and history are preserved.
 
-## Image tags
+## Get upstream updates
 
-Images are published to `ghcr.io/kordonskim/wyoming-vulkan` only after Linux container unit/protocol tests and
-native binding ABI checks pass. GPU integration tests still need a Vulkan host.
+In **Actions → Update from upstream**, run the workflow on `main`.
 
-| Build | Published tags |
-| --- | --- |
-| Push to `main`, or manual Docker workflow run on `main` | `latest`, `sha-<12-character commit>` |
-| Push a release Git tag such as `v0.10.0-ha.1` | `0.10.0-ha.1`, `sha-<12-character commit>` |
-| Pull request, or manual run on another branch | Checks only; no image published |
+1. The job resolves jdbridge's current main commit.
+2. It downloads that exact source and checks that the patch series applies cleanly.
+3. It opens a PR changing only the revision in `upstream.json`.
+4. It explicitly runs **Checks** on that PR branch: download, patch, build, unit/protocol tests and ABI checks.
+5. Review the upstream changes and checks, then merge. Main's Docker workflow publishes tested tagged images.
 
-`latest` follows this fork's main branch. Release tags do not move `latest`, so releasing an older revision
-cannot roll it back. Version strings name this fork's releases; the Python package version still identifies
-the upstream software version. Choose a new release tag for each release, and do not move existing tags.
+A patch conflict stops the update; no image is published and the old pin remains unchanged. An already open
+upstream update PR must be merged or closed before another is created. Real GPU tests still need your Vulkan host.
 
-To release a tested commit already pushed to your fork:
+Enable **Settings → Actions → General → Workflow permissions → Allow GitHub Actions to create and approve
+pull requests**. Organization policy must permit the workflow's declared permissions. The built-in GitHub token
+is sufficient; no personal access token or HA token is needed. Automatic PR checks may separately request approval;
+the workflow explicitly dispatches Checks as well.
+
+## Release an image
+
+Main builds publish `latest` and `sha-<12-character commit>`. To publish a version for a tested commit:
 
 ```bash
 git tag -a v0.10.0-ha.1 -m "Home Assistant vocabulary biasing release 1"
 git push origin v0.10.0-ha.1
 ```
 
-Use a pinned image tag in `deploy/.env`, for example:
+This publishes `ghcr.io/kordonskim/wyoming-vulkan:0.10.0-ha.1` and its SHA tag after checks, without moving
+`latest`. Choose a new version for each release; do not move existing release tags. Pin the image tag in your
+deployment's `WYOMING_VULKAN_IMAGE`, or pin its registry digest for an exact image artifact. Release versions
+identify this build repository; the application's version still identifies the upstream software version.
 
-```dotenv
-WYOMING_VULKAN_IMAGE=ghcr.io/kordonskim/wyoming-vulkan:0.10.0-ha.1
-```
+## Change a patch
 
-The shipped Compose stack uses `pull_policy: never` for local builds. Pull the selected published image explicitly
-before starting it:
+Prepare a fresh upstream source tree with `python3 scripts/prepare-source.py --dest .build/edit`.
+The existing patches are staged in that tree's Git index against its upstream HEAD. Edit the generated source,
+run its tests, and stage the intended changes **in the generated repository**. Never stage credentials or models.
 
-```bash
-docker pull ghcr.io/kordonskim/wyoming-vulkan:0.10.0-ha.1
-cd deploy && docker compose up -d
-```
-
-Release and SHA tags remain available for rollback. For an exact image artifact, pin its registry digest.
-HA credentials belong in a mounted token file, never in image tags, build arguments, the repository or the image.
-
-## Update from jdbridge
-
-In your fork's **Actions**, choose **Update from upstream**, then **Run workflow** on `main`.
-It merges upstream into a new review branch and opens a PR; it never pushes directly to `main`.
-The workflow explicitly dispatches **Checks** on that branch. Review its results and the PR before merging.
-Merging the PR triggers the Docker workflow and publishes new `latest` and SHA tags after checks pass.
-An already open upstream PR must be merged or closed before another is created.
-
-Enable **Settings → Actions → General → Workflow permissions → Allow GitHub Actions to create and approve
-pull requests**. Repository/organization policy must allow the declared workflow permissions. No personal access
-token is needed. If the PR's separate automatic checks request approval, use **Approve workflows to run**;
-the explicitly dispatched Checks run is also available in Actions.
-
-If an upstream merge conflicts with HA support or the image workflows, the update workflow stops without
-changing main. Resolve locally using the steps below; do not discard the fork's feature commits.
+Export the resulting diff relative to upstream HEAD to a temporary patch file:
 
 ```bash
-# Once per clone (already configured in this working copy):
-git remote add upstream https://github.com/jdbridge/wyoming-vulkan.git
-
-# Start with a clean working tree:
-git switch main
-git pull --ff-only origin main
-git fetch upstream --no-tags
-git switch -c codex/upstream-update
-git merge upstream/main
-# Resolve conflicts, stage the resolved files, and complete the merge if necessary.
-git push -u origin codex/upstream-update
+git -C .build/edit diff --cached --binary --output=../../patches/0001-home-assistant-vocabulary.patch HEAD
 ```
 
-Open a PR from that branch into your fork's main and wait for checks. Fetching with `--no-tags` keeps upstream
-release tags separate from this fork's image releases. Do not use a force-sync or hard reset to update main:
-that would discard the fork's changes.
+The current series has one cumulative patch. If adding separate patches, export each against the source produced
+by preceding patches and list them in `patches/series`. Validate a newly exported patch with a fresh preparation,
+then commit the patch files and any pin change in this build repository. The export path above is relative to
+`.build/edit`, placing it in the root `patches` directory.
+
+To test a candidate revision without changing the pin:
+
+```bash
+python3 scripts/prepare-source.py --revision FULL_40_CHARACTER_SHA --dest .build/candidate
+```
+
+The script refuses to reuse existing destinations. Keep runtime data outside generated source directories when
+updating deployments. For generated source's full Linux checks, use its `tests/run.sh` and `tests/check_abi.sh`;
+the complete integration suite also needs downloaded models and a Vulkan GPU.
