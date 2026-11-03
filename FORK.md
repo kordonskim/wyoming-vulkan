@@ -12,7 +12,7 @@ In **Actions → Update from upstream**, run the workflow on `main`.
 2. It downloads that exact source and checks that the patch series applies cleanly.
 3. It opens a PR changing only the revision in `upstream.json`.
 4. It explicitly runs **Checks** on that PR branch: download, patch, build, unit/protocol tests and ABI checks.
-5. Review the upstream changes and checks, then merge. Main's Docker workflow publishes tested tagged images.
+5. Review the upstream changes and checks, then merge. When ready to release, manually run Build Wyoming Vulkan.
 
 A patch conflict stops the update; no image is published and the old pin remains unchanged. An already open
 upstream update PR must be merged or closed before another is created. Real GPU tests still need your Vulkan host.
@@ -24,15 +24,17 @@ the workflow explicitly dispatches Checks as well.
 
 ## Release an image
 
-Main builds publish `latest`. To publish a short version tag for a tested commit:
+Image publishing runs only when requested manually. Pushes to main and Git tags do not trigger it.
 
-```bash
-git tag -a v0.1.0 -m "Home Assistant vocabulary biasing v0.1.0"
-git push origin v0.1.0
-```
+1. Open **Actions → Build Wyoming Vulkan → Run workflow**.
+2. Select **main**.
+3. Enter a new version, such as **v0.1.1**.
+4. Click **Run workflow**.
 
-This publishes `ghcr.io/kordonskim/wyoming-vulkan:v0.1.0` after checks, without moving
-`latest`. Choose a new version for each release; do not move existing release tags. Pin the image tag in your
+The workflow validates that the version has the form `vX.Y.Z` and is unused, downloads upstream, applies the HA
+patch, runs checks, and publishes `ghcr.io/kordonskim/wyoming-vulkan:v0.1.1` plus `latest`. After publishing,
+it creates the matching Git tag on the tested commit. You do not need to create or push a tag yourself.
+Choose a new version for each release; existing release tags are rejected. Pin the image tag in your
 deployment's `WYOMING_VULKAN_IMAGE`, or pin its registry digest for an exact image artifact. Release versions
 identify this build repository; the application's version still identifies the upstream software version.
 The next release can use `v0.1.1` or `v0.2.0`. The `v` prefix is preserved in image tags. Deployment is manual:

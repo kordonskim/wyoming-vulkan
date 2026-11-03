@@ -28,13 +28,13 @@ Images: `ghcr.io/kordonskim/wyoming-vulkan`.
 
 | Trigger | Image tags |
 | --- | --- |
-| Push or manual Docker build on main | `latest` |
-| Push release tag `v0.1.0` | `v0.1.0` |
-| PR or manual build on another branch | Checks only; no publishing |
+| Manually run Build Wyoming Vulkan on main, entering `v0.1.1` | `v0.1.1`, `latest`; creates Git tag `v0.1.1` |
+| Push to main or push a Git tag | No image build |
+| Pull request, or manually run Checks | Checks only; no publishing |
 
 Images publish after container unit/protocol tests and native ABI checks pass. Real GPU integration tests
 require a Vulkan host. Image labels record the upstream and build-repository revisions. Release image tags keep
-the `v` prefix, such as `v0.1.0` and `v0.2.0`. Version tags do not move `latest`. Deploy any chosen version manually;
+the `v` prefix, such as `v0.1.0` and `v0.2.0`. `latest` follows the most recent successful manual release. Deploy any chosen version manually;
 the workflows build images but do not update your running containers. See [maintenance and releases](FORK.md).
 
 ## Local build

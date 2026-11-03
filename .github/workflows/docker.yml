@@ -3,27 +3,55 @@ name: Build Wyoming Vulkan
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    tags: ['v[0-9]*']
+    inputs:
+      version:
+        description: 'New release tag, e.g. v0.1.1 (must not already exist)'
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: docker-${{ github.ref }}
+  group: manual-image-release
   cancel-in-progress: false
 
 jobs:
+  validate-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate the requested release
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
+            echo 'Run releases from the main branch.' >&2
+            exit 1
+          fi
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'Enter a version such as v0.1.1 or v0.2.0.' >&2
+            exit 1
+          fi
+          existing=$(git ls-remote --tags origin "refs/tags/$VERSION")
+          if [[ -n "$existing" ]]; then
+            echo 'That release tag already exists. Choose a new version.' >&2
+            exit 1
+          fi
+
   checks:
+    needs: validate-version
     uses: ./.github/workflows/checks.yml
 
   publish:
     needs: checks
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - name: Checkout
@@ -45,8 +73,8 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           flavor: latest=false
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=ref,event=tag
+            type=raw,value=${{ inputs.version }}
+            type=raw,value=latest
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -67,3 +95,13 @@ jobs:
             io.github.kordonskim.upstream.revision=${{ steps.source.outputs.revision }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Create matching Git release tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$VERSION" "$GITHUB_SHA" -m "Wyoming Vulkan HA $VERSION"
+          git push origin "refs/tags/$VERSION"
+          echo "Published ghcr.io/${GITHUB_REPOSITORY}:$VERSION and latest; created Git tag $VERSION." >> "$GITHUB_STEP_SUMMARY"

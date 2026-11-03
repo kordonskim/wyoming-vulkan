@@ -62,7 +62,7 @@ jobs:
           cat > "$RUNNER_TEMP/upstream-pr.md" <<'BODY'
           Update the upstream source revision downloaded during Docker builds. The HA patch series applied cleanly to this candidate revision.
 
-          Review the new upstream revision and the manually dispatched Checks run before merging. Checks download the candidate source, apply the patches, build the image, and run unit/protocol and ABI tests. Merging triggers tagged image publishing. Real Vulkan GPU testing still requires a GPU host.
+          Review the new upstream revision and the manually dispatched Checks run before merging. Checks download the candidate source, apply the patches, build the image, and run unit/protocol and ABI tests. After merging, manually run Build Wyoming Vulkan with a new version to publish an image. Real Vulkan GPU testing still requires a GPU host.
           BODY
           url=$(gh pr create --base main --head "$branch" --title 'Update jdbridge upstream source revision' --body-file "$RUNNER_TEMP/upstream-pr.md")
           echo "Update PR: $url" >> "$GITHUB_STEP_SUMMARY"
