@@ -56,6 +56,9 @@ Generated source is ignored by Git. The HA instructions and complete deployment 
 
 ## Deploy
 
+For persistent Kubernetes deployments, see the [separate model-download Job example](examples/kubernetes-model-job/README.md).
+It moves network preparation out of normal pod startup and replaces it with a quick read-only file check.
+
 Existing init containers can continue cloning this repository and running `scripts/fetch-models.sh` directly.
 The wrapper downloads the model script from the revision in `upstream.json`, applies the model catalog extension,
 and forwards all arguments. It does not need Python or a prepared source tree. It requires Bash, Git, curl, sed and coreutils, matching the Alpine init

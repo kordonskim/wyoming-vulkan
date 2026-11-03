@@ -1,0 +1,41 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Use a new name (v2, v3, ...) when changing the requested model set or source revision.
+  name: wyoming-models-v1
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 7200
+  # Keep completed Jobs: a TTL would let Flux recreate the Job and run it again.
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/hostname: media
+      containers:
+        - name: download-models
+          image: alpine:3.20
+          imagePullPolicy: IfNotPresent
+          env:
+            # Catalog commit containing all four model choices; independent of the application image version.
+            - name: MODEL_SOURCE_REVISION
+              value: 25a74d49bba9e373e76a679f63aaf6052eb77e9f
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              apk add --no-cache bash curl git coreutils ca-certificates
+              git init -q /tmp/wyoming-vulkan
+              git -C /tmp/wyoming-vulkan remote add origin https://github.com/kordonskim/wyoming-vulkan.git
+              git -C /tmp/wyoming-vulkan fetch --depth 1 origin "$MODEL_SOURCE_REVISION"
+              git -C /tmp/wyoming-vulkan checkout -q --detach FETCH_HEAD
+              bash /tmp/wyoming-vulkan/scripts/fetch-models.sh -d /data/models \
+                parakeet-q8_0 whisper-medium-q5_0 whisper-large-v3-turbo-q5_0 whisper-large-v3-q5_0
+              mkdir -p /data/voices
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            # Replace with the SAME existing claim mounted at /data by your Deployment.
+            claimName: replace-with-existing-data-pvc
