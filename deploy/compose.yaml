@@ -17,6 +17,7 @@ services:
     # "graphics" capability brings NVIDIA's Vulkan driver into the container. Then choose per engine with *_GPU below.
     runtime: ${DOCKER_RUNTIME:-runc}
     environment:
+      WYOMING_HASS_TOKEN_FILE: ${HASS_TOKEN_FILE:-}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-}
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,graphics
     user: "${PUID:-1000}:${PGID:-1000}"   # must be able to read the model and voice folders
@@ -72,6 +73,12 @@ configs:
 
       # The default GPU (part of its Vulkan name); each engine can pick another with gpu = "intel" | "nvidia" |
       # "amd" | "<part of the name>", and device = "gpu" | "cpu" | "auto" (GPU, else CPU with a warning).
+      [hass]
+      api = "${HASS_API:-http://homeassistant.local:8123/api}"
+      refresh_seconds = ${HASS_REFRESH_SECONDS:-60}
+      timeout = ${HASS_TIMEOUT:-10}
+      prompt_max_tokens = ${HASS_PROMPT_MAX_TOKENS:-200}
+
       [gpu]
       name_contains = "${GPU_NAME_CONTAINS:-Intel}"
       vendor_id = ${GPU_VENDOR_ID:-0x8086}

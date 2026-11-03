@@ -1,6 +1,8 @@
 """TOML configuration: server, GPU recognition, STT and TTS engines, and folders of voices (TTS libraries)."""
 
 import tomllib
+import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -11,6 +13,43 @@ DEFAULT_CONFIG = Path("/etc/wyoming-vulkan/config.toml")
 
 class ConfigError(ValueError):
     pass
+
+
+@dataclass
+class HassConfig:
+    api: str = "http://homeassistant.local:8123/api"
+    token_env: str = "WYOMING_HASS_TOKEN"
+    token_file: str = ""
+    refresh_seconds: float = 60.0
+    timeout: float = 10.0
+    prompt_max_tokens: int = 200
+
+    def validate(self):
+        if (not isinstance(self.prompt_max_tokens, int) or isinstance(self.prompt_max_tokens, bool)
+                or not 1 <= self.prompt_max_tokens <= 223):
+            raise ConfigError("[hass]: prompt_max_tokens must be between 1 and 223")
+        for key, minimum in (("refresh_seconds", 0), ("timeout", 0)):
+            value = getattr(self, key)
+            if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                    or not math.isfinite(value) or value < minimum or (key == "timeout" and value == 0)):
+                raise ConfigError(f"[hass]: invalid {key}")
+        if not all(isinstance(v, str) for v in (self.api, self.token_env, self.token_file)):
+            raise ConfigError("[hass]: api, token_env and token_file must be strings")
+        from .hass_api import HomeAssistant
+        try:
+            HomeAssistant("", self.api)
+        except ValueError:
+            raise ConfigError("[hass]: invalid API URL") from None
+
+    def read_token(self):
+        """Secrets are read at startup, never stored on the serializable config."""
+        path = self.token_file or os.environ.get("WYOMING_HASS_TOKEN_FILE", "")
+        if path:
+            try:
+                return Path(path).read_text(encoding="utf-8").strip()
+            except OSError:
+                raise ConfigError("Cannot read HA token file") from None
+        return os.environ.get(self.token_env, "").strip()
 
 
 @dataclass
@@ -105,6 +144,7 @@ class Config:
     endpoint: list[EndpointConfig] = field(default_factory=list)  # extra endpoints ([[endpoint]])
     # speech settings by voice name, "*" = every voice: {"*": {"noise_w": 0.6}, "en_US-x-high": {"length_scale": 1.1}}
     voice_settings: dict[str, dict[str, Any]] = field(default_factory=dict)
+    hass: HassConfig = field(default_factory=HassConfig)
 
     def speech_options(self, voice: str, entry_options: dict[str, Any]) -> dict[str, Any]:
         """A voice's engine options with its speech settings merged in. Precedence (last wins): [voice_settings."*"],
@@ -152,6 +192,8 @@ def _languages(value) -> Optional[list[str]]:
 
 def _engine(kind: str, i: int, data: dict) -> EngineConfig:
     where = f"[[{kind}]] #{i + 1}"
+    if "initial_prompt" in data and not isinstance(data["initial_prompt"], str):
+        raise ConfigError(f"{where}: initial_prompt must be a string")
     for key in ("name", "backend", "model"):
         if not data.get(key):
             raise ConfigError(f"{where}: '{key}' is required")
@@ -218,7 +260,7 @@ def _endpoint(i: int, data: dict) -> EndpointConfig:
 def load_config(path: Path) -> Config:
     with open(path, "rb") as f:
         raw = tomllib.load(f)
-    unknown = set(raw) - {"server", "gpu", "stt", "tts", "tts_library", "tts_pack", "endpoint", "voice_settings"}
+    unknown = set(raw) - {"server", "gpu", "stt", "tts", "tts_library", "tts_pack", "endpoint", "voice_settings", "hass"}
     if unknown:
         raise ConfigError(f"unknown sections {sorted(unknown)}")
     config = Config(
@@ -230,7 +272,9 @@ def load_config(path: Path) -> Config:
         tts_pack=[_engine("tts", i, {"device": "auto", **d}) for i, d in enumerate(raw.get("tts_pack", []))],
         endpoint=[_endpoint(i, d) for i, d in enumerate(raw.get("endpoint", []))],
         voice_settings=_voice_settings(raw.get("voice_settings", {})),
+        hass=_section(raw, "hass", HassConfig),
     )
+    config.hass.validate()
     if not (config.stt or config.tts or config.tts_library or config.tts_pack):
         raise ConfigError("no [[stt]], [[tts]], [[tts_library]] or [[tts_pack]] configured")
     for engines in (config.stt, config.tts, config.tts_pack):

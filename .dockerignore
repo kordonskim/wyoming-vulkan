@@ -1,0 +1,15 @@
+.git
+.uv-cache
+.venv
+venv
+**/__pycache__
+**/.env
+**/.env.*
+!**/.env.example
+**/secrets
+deploy/data
+data
+models
+voices
+voices-extra
+*.patch

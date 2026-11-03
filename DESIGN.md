@@ -201,3 +201,20 @@ Each engine picks its GPU with `gpu = "intel" | "nvidia" | "amd" | "<part of the
 **A pack with `device = "gpu"` whose GPU is missing** is not offered at all (warning), since it could only fail on first use.
 
 **Measurements** on the Intel iGPU, the RTX 4060 and the CPU: `README.md` (Measurements).
+# Home Assistant vocabulary biasing
+
+`hass_api.py` reads conversation exposure, states and registries through the HA WebSocket API.
+Credentials are loaded separately from `Config` and passed only to the client; neither configuration nor
+diagnostics store the token. Error messages exclude server payloads and transport exception details.
+
+`name_cache.py` owns one background task and one last-good `RecognitionContext`, shared by the `Services`
+objects for every endpoint. Startup and audio events schedule refreshes; no transcription awaits them.
+The refresh interval applies to attempts, including failures. Successful empty snapshots remove old names;
+failures keep the previous snapshot. Shutdown cancels the task.
+
+The handler captures a snapshot before dispatching work to a thread. `SttEngine.transcribe_with_vocabulary`
+defaults to ordinary transcription, preserving Parakeet. Whisper overrides it and constructs a prompt under
+its existing context lock with `whisper_tokenize`, including the initial space added by whisper.cpp.
+Prompts are cached per snapshot, engine, budget and prefix. The budget includes the prefix and is bounded
+by both configuration and the model's text context. UTF-8 prompt bytes stay alive throughout `whisper_full`;
+the shared parameters' pointer is cleared in `finally`. GPU initialization and ctypes struct layouts are unchanged.

@@ -93,6 +93,10 @@ class Engine(ABC):
 class SttEngine(Engine):
     sample_rate = 16000
 
+    def transcribe_with_vocabulary(self, audio, language, context, max_tokens):
+        """Backends without prompt support retain their existing transcription behavior."""
+        return self.transcribe(audio, language)
+
     @abstractmethod
     def transcribe(self, audio: np.ndarray, language: Optional[str]) -> str:
         """audio: float32 mono in [-1, 1] at self.sample_rate. Thread-safe (engines lock internally)."""

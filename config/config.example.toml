@@ -7,6 +7,14 @@ samples_per_chunk = 1024         # size of the audio-chunk events sent back (as 
 max_audio_seconds = 60           # STT input beyond this is dropped
 max_warm_models = 1              # TTS models kept loaded, each in its own process (least recently used is stopped)
 
+[hass]                           # optional vocabulary biasing for every Whisper model; no token = disabled
+api = "http://homeassistant.local:8123/api"
+token_env = "WYOMING_HASS_TOKEN"  # name of an environment variable, never the token itself
+token_file = ""                  # or WYOMING_HASS_TOKEN_FILE; file takes precedence over environment token
+refresh_seconds = 60             # minimum between background attempts; 0 = refresh on each utterance
+timeout = 10                     # complete background fetch timeout; transcription never waits
+prompt_max_tokens = 200           # 1..223, includes the optional static initial_prompt
+
 [gpu]                            # how the GPU is recognised (Intel shown)
 name_contains = "Intel"          # in the ggml / Vulkan device description, e.g. "Intel(R) Graphics (ADL-N)"
 vendor_id = 0x8086               # PCI vendor of the ONNX Runtime WebGPU EP device
@@ -36,6 +44,7 @@ threads = 4                      # backend option: CPU threads
 # audio_ctx = 512                 # encoder window in 20 ms frames: 512 = ~10 s, ~3x faster; 0 = full 30 s
 # threads = 4
 # max_seconds = 15                # time budget per request (repetition loops are cut off)
+# initial_prompt = ""             # optional static vocabulary prefix, also works without HA
 #
 # HA makes one STT entity per port and never picks a model, so every STT choice that should be selectable in HA
 # gets its own endpoint (all share the loaded engines). On each endpoint a request goes to the first engine that

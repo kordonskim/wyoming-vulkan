@@ -28,6 +28,7 @@ from .config import ServerConfig
 from .engines.base import SttEngine, SynthesisOptions
 from .info import build_info
 from .voices import VoiceRegistry
+from .name_cache import HassNameCache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +41,8 @@ class Services:
     stt: list[SttEngine]  # this endpoint's engines, in routing order
     tts: Optional[VoiceRegistry]  # None: this endpoint offers no voices
     stt_name: Optional[str] = None  # program name for HA (default: the first engine's label)
+    names: Optional[HassNameCache] = None
+    prompt_max_tokens: int = 200
 
     def stt_engine(self, name: Optional[str], language: Optional[str] = None) -> SttEngine:
         """By name if given and known; else the first engine that supports the language; else the first engine."""
@@ -115,6 +118,8 @@ class WyomingHandler(AsyncEventHandler):
             return True
         if AudioStart.is_type(event.type):
             self._reset_audio()
+            if self.services.names is not None:
+                self.services.names.schedule_refresh()
             return True
         if AudioChunk.is_type(event.type):
             self._add_audio(AudioChunk.from_event(event))
@@ -188,7 +193,13 @@ class WyomingHandler(AsyncEventHandler):
             return
         pcm = np.frombuffer(b"".join(self._audio), dtype=np.int16).astype(np.float32) / 32768.0
         t = time.perf_counter()
-        text = await asyncio.to_thread(engine.transcribe, pcm, self._language)
+        if self.services.names is None:
+            text = await asyncio.to_thread(engine.transcribe, pcm, self._language)
+        else:
+            text = await asyncio.to_thread(
+                engine.transcribe_with_vocabulary, pcm, self._language,
+                self.services.names.context, self.services.prompt_max_tokens,
+            )
         _LOGGER.info(
             "stt %s: %.2f s audio -> %.3f s: %r", engine.name, len(pcm) / 16000, time.perf_counter() - t, text
         )

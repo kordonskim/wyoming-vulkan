@@ -120,6 +120,94 @@ config when it runs without Compose.
 Voice folders on network shares are fine: they are optional (a missing or hung share only removes its voices), and a
 voice is offered only once its files have stopped changing.
 
+## Home Assistant vocabulary biasing
+
+Whisper can use conversation-exposed entity names, aliases, areas and floors as recognition context.
+This applies to every `whisper.cpp` model, including Medium and Large V3 Turbo. Parakeet continues to use its
+existing decoder. Vulkan device selection and Wyoming ports keep their existing settings.
+
+Create a Home Assistant long-lived access token from your HA profile. With Compose, save it in
+`DATA_DIR/secrets/ha-token`, readable by the container's `PUID`, and set these **nonsecret** values in `deploy/.env`:
+
+```dotenv
+HASS_API=http://homeassistant.local:8123/api
+HASS_TOKEN_FILE=/data/secrets/ha-token
+HASS_REFRESH_SECONDS=60
+HASS_TIMEOUT=10
+HASS_PROMPT_MAX_TOKENS=200
+```
+
+The file path is inside the container; `/data` is already mounted read-only. Use HTTPS when the network is
+untrusted. Keep the token file out of source control (the repository ignores `secrets/` and `deploy/data/`).
+The server never logs authentication payloads or HA error response bodies. Tokens are not included in diagnostic
+configuration. Do not put a token in TOML, `.env`, a command, or a bug report. A Docker secret mounted at
+`/run/secrets/ha_token` also works: point `HASS_TOKEN_FILE` there and attach the secret through your Compose override.
+
+Outside Compose, use `[hass]` in `config/config.example.toml`, with `token_file`, `WYOMING_HASS_TOKEN_FILE`,
+or the environment variable named by `token_env` (default `WYOMING_HASS_TOKEN`). File credentials take precedence
+over environment credentials. CLI overrides are `--hass-api`, `--hass-token-file`, `--hass-refresh-seconds`,
+`--hass-prompt-max-tokens`, and `--hass-timeout`. `--hass-token` is supported for compatibility with
+wyoming-faster-whisper, but exposes the token to process inspection; prefer the file option.
+Without credentials, HA fetching is disabled. Each Whisper `[[stt]]` may also set `initial_prompt = "Nanit, Ecobee."`
+as a static vocabulary prefix, with or without HA.
+
+One asynchronous cache serves all endpoints and Whisper models. It fetches at startup and schedules a refresh
+when audio arrives and the interval has elapsed; `0` refreshes on every utterance. Transcription never waits for
+HA: it uses the last successful snapshot, or only the static prefix before the first successful fetch. Failed,
+timed-out or malformed responses retain the previous snapshot and retry on subsequent utterances. `HASS_TIMEOUT`
+bounds the entire background fetch, including authentication and WebSocket reads.
+
+Names are normalized and deduplicated, then selected in this order: areas and floors containing exposed entities;
+entities in command-oriented domains (lights, switches, fans, media players, climate, scenes, to-do lists);
+remaining areas/floors; remaining exposed entities. Aliases follow their own name within each tier. Disabled
+entities and entities not exposed to conversation are excluded. Entity areas override device areas; floors
+inherit use from their areas. Friendly names take precedence over registry names.
+
+The prompt stops at the first name that exceeds the budget. Each model's native tokenizer counts the complete
+prompt, including punctuation and any static prefix. The default is 200 tokens, configurable from 1 to 223 and
+also capped below half the model's text context. An oversized static prefix is rejected at startup. Vocabulary
+biasing can improve recognition of unusual names, but can also encourage hallucinations; reduce the budget if needed.
+
+To offer **Medium and Large V3 Turbo simultaneously**, download both:
+
+```bash
+scripts/fetch-models.sh -d deploy/data/models whisper-medium-q5_0 whisper-large-v3-turbo-q5_0
+```
+
+Append these blocks to the inline TOML config in `deploy/compose.yaml`, and publish ports `10313:10313` and
+`10314:10314` in the service's `ports` list. Existing Parakeet and Whisper endpoints remain available.
+
+```toml
+[[stt]]
+name = "whisper-medium"
+backend = "whisper.cpp"
+model = "/data/models/whisper/ggml-medium-q5_0.bin"
+device = "gpu"
+languages = "auto"
+description = "Whisper Medium"
+audio_ctx = 0
+
+[[stt]]
+name = "whisper-turbo"
+backend = "whisper.cpp"
+model = "/data/models/whisper/ggml-large-v3-turbo-q5_0.bin"
+device = "gpu"
+languages = "auto"
+description = "Whisper Large V3 Turbo"
+audio_ctx = 0
+
+[[endpoint]]
+uri = "tcp://0.0.0.0:10313"
+stt = ["whisper-medium"]
+
+[[endpoint]]
+uri = "tcp://0.0.0.0:10314"
+stt = ["whisper-turbo"]
+```
+
+Add each port as a Wyoming integration in HA. Both models share the HA snapshot and build a separate token-budgeted
+prompt. `device = "gpu"` requires a usable Vulkan GPU; use `auto` if CPU fallback is desired.
+
 ## Diagnostics page
 
 `http://<docker host>:10312/` (`DIAG_PORT`; `web_port = 0` in the inline config turns it off). No authentication:

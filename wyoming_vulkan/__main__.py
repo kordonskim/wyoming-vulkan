@@ -39,6 +39,12 @@ async def main() -> int:
     parser.add_argument("--uri", help="override [server] uri, e.g. tcp://0.0.0.0:10310")
     parser.add_argument("--device", choices=DEVICES, help="override the device of every engine")
     parser.add_argument("--debug", action="store_true", help="debug logging, incl. ggml output")
+    parser.add_argument("--hass-api", help="override [hass] api URL")
+    parser.add_argument("--hass-token", help="HA access token; prefer WYOMING_HASS_TOKEN_FILE")
+    parser.add_argument("--hass-token-file", help="HA token file (preferred over command-line token)")
+    parser.add_argument("--hass-refresh-seconds", type=float)
+    parser.add_argument("--hass-prompt-max-tokens", type=int)
+    parser.add_argument("--hass-timeout", type=float, help="background HA fetch timeout; transcription never waits")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -49,6 +55,14 @@ async def main() -> int:
 
     try:
         config = load_config(args.config)
+        for key in ("api", "token_file", "refresh_seconds", "prompt_max_tokens", "timeout"):
+            value = getattr(args, "hass_" + key)
+            if value is not None:
+                setattr(config.hass, key, value)
+        config.hass.validate()
+        token = (config.hass.read_token() if args.hass_token is None or config.hass.token_file
+                 else args.hass_token.strip())
+        args.hass_token = None
     except (OSError, ConfigError) as err:
         _LOGGER.error("Config %s: %s", args.config, err)
         return 2
@@ -57,6 +71,9 @@ async def main() -> int:
     if args.device:
         for e in config.stt + config.tts + config.tts_library + config.tts_pack:
             e.device = "igpu" if args.device == "gpu" else args.device
+    for cfg in config.stt:
+        if cfg.backend == "whisper.cpp":
+            cfg.options["prompt_max_tokens"] = config.hass.prompt_max_tokens
     for section, entries, kind in (("[[tts]]", config.tts, "tts"), ("[[tts_pack]]", config.tts_pack, "tts_pack")):
         for e in entries:
             if BACKENDS.get(e.backend, ("",))[0] != kind:
@@ -123,12 +140,21 @@ async def main() -> int:
         len(tts), len(library_names) - len(voices.pack_voices), len(config.tts_library), len(voices.pack_voices),
         len(voices.packs), config.server.max_warm_models,
     )
+    names = None
+    if token:
+        from .hass_api import HomeAssistant
+        from .name_cache import HassNameCache
+
+        names = HassNameCache(HomeAssistant(token, config.hass.api, config.hass.timeout), config.hass.refresh_seconds)
+        names.schedule_refresh()
+    token = None
     # One Wyoming server per endpoint, all sharing the loaded engines (HA: one STT entity per endpoint)
     by_name = {e.name: e for e in stt}
     servers = []
     for ep in config.endpoints:
         ep_stt = [by_name[n] for n in ep.stt] if ep.stt is not None else list(stt)
-        services = Services(server=config.server, stt=ep_stt, tts=voices if ep.tts else None, stt_name=ep.name)
+        services = Services(server=config.server, stt=ep_stt, tts=voices if ep.tts else None, stt_name=ep.name,
+                            names=names, prompt_max_tokens=config.hass.prompt_max_tokens)
         servers.append((AsyncServer.from_uri(ep.uri), partial(WyomingHandler, services)))
         _LOGGER.info(
             "Endpoint %s: stt %s, tts %s", ep.uri, " > ".join(e.name for e in ep_stt) or "none",
@@ -139,7 +165,11 @@ async def main() -> int:
 
         await DiagnosticsWeb(config, stt, voices).start(config.server.web_host, config.server.web_port)
     _LOGGER.info("Ready on %s after %.1f s", ", ".join(ep.uri for ep in config.endpoints), time.perf_counter() - started)
-    await asyncio.gather(*(server.run(factory) for server, factory in servers))
+    try:
+        await asyncio.gather(*(server.run(factory) for server, factory in servers))
+    finally:
+        if names is not None:
+            await names.close()
     return 0
 
 

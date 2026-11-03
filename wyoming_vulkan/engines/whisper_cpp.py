@@ -20,6 +20,8 @@ from typing import Optional
 import numpy as np
 
 from .. import devices
+from ..config import ConfigError
+from ..vocabulary import RecognitionContext
 from . import ggml
 from .base import GpuUnavailable, SttEngine
 
@@ -154,6 +156,10 @@ def _lib() -> C.CDLL:
         L.whisper_model_type_readable.argtypes = [C.c_void_p]
         L.whisper_model_type_readable.restype = C.c_char_p
         L.whisper_free.argtypes = [C.c_void_p]
+        L.whisper_tokenize.argtypes = [C.c_void_p, C.c_char_p, C.POINTER(C.c_int), C.c_int]
+        L.whisper_tokenize.restype = C.c_int
+        L.whisper_n_text_ctx.argtypes = [C.c_void_p]
+        L.whisper_n_text_ctx.restype = C.c_int
         L.whisper_lang_max_id.restype = C.c_int
         L.whisper_lang_str.argtypes = [C.c_int]
         L.whisper_lang_str.restype = C.c_char_p
@@ -242,6 +248,14 @@ class WhisperEngine(SttEngine):
         self.audio_ctx = int(o.get("audio_ctx", 0))
         self.fallback_language = o.get("language") or (None if self.multilingual else "en")
         self.lock = threading.Lock()  # whisper_full is not thread-safe for one context
+        self._empty_vocabulary = RecognitionContext()
+        self.prompt_max_tokens = min(223, L.whisper_n_text_ctx(ctx) // 2 - 1)
+        # Validate the static prefix before accepting requests. Counting occurs under the context lock.
+        with self.lock:
+            try:
+                self._prompt(self._empty_vocabulary, self.config.options.get("prompt_max_tokens", 200))
+            except ValueError:
+                raise ConfigError("Whisper initial_prompt exceeds the configured token budget") from None
         self.runtime.actual = device
         _LOGGER.info(
             "stt %s: loaded %s (%s, %s) on %s, audio_ctx %s",
@@ -263,6 +277,21 @@ class WhisperEngine(SttEngine):
         return self.fallback_language
 
     def transcribe(self, audio: np.ndarray, language: Optional[str]) -> str:
+        return self.transcribe_with_vocabulary(
+            audio, language, self._empty_vocabulary, self.config.options.get("prompt_max_tokens", 200)
+        )
+
+    def _prompt(self, context, max_tokens):
+        def count(text):
+            # whisper.cpp prepends a space when tokenizing initial_prompt.
+            return abs(_lib().whisper_tokenize(self.ctx, (" " + text).encode("utf-8"), None, 0)) if text else 0
+
+        return context.whisper_prompt(
+            count, min(max_tokens, self.prompt_max_tokens),
+            prefix=self.config.options.get("initial_prompt"), tokenizer_key=str(id(self)),
+        )
+
+    def transcribe_with_vocabulary(self, audio, language, context, max_tokens):
         assert self.ctx, "engine not loaded"
         audio = np.ascontiguousarray(audio, dtype=np.float32)
         L = _lib()
@@ -273,6 +302,9 @@ class WhisperEngine(SttEngine):
         budget = float(self.max_seconds) if self.max_seconds else max(15.0, 3 * seconds)
         with self.lock:  # the params struct is shared, so it is filled in under the lock too
             p = self.params
+            prompt = self._prompt(context, max_tokens)
+            prompt_bytes = prompt.encode("utf-8") if prompt else None
+            p.initial_prompt = prompt_bytes  # keep bytes alive until whisper_full returns
             p.language = lang_bytes
             p.detect_language = False  # True would only detect, not transcribe
             p.audio_ctx = audio_ctx
@@ -281,6 +313,7 @@ class WhisperEngine(SttEngine):
                 rc = L.whisper_full(self.ctx, p, audio.ctypes.data_as(C.POINTER(C.c_float)), len(audio))
             finally:
                 self._deadline = float("inf")
+                p.initial_prompt = None
             n = L.whisper_full_n_segments(self.ctx)
             parts = [L.whisper_full_get_segment_text(self.ctx, i).decode("utf-8", "replace").strip() for i in range(n)]
         if rc != 0:
