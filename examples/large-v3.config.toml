@@ -1,0 +1,14 @@
+# Append to the existing config.toml. Keep its [server], [gpu], [hass] and other engines/endpoints.
+# Download with: scripts/fetch-models.sh -d /data/models whisper-large-v3-q5_0
+[[stt]]
+name = "whisper-large-v3"
+backend = "whisper.cpp"
+model = "/data/models/whisper/ggml-large-v3-q5_0.bin"
+description = "Whisper Large V3 Q5"
+device = "gpu"
+languages = "auto"
+audio_ctx = 0
+
+[[endpoint]]
+uri = "tcp://0.0.0.0:10314"
+stt = ["whisper-large-v3"]

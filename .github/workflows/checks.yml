@@ -24,7 +24,7 @@ jobs:
           import os
           from pathlib import Path
           names = {line.split()[0] for line in Path(os.environ["RUNNER_TEMP"], "wyoming-models.txt").read_text().splitlines() if line.strip()}
-          assert {"parakeet-q8_0", "whisper-medium-q5_0", "whisper-large-v3-turbo-q5_0"} <= names
+          assert {"parakeet-q8_0", "whisper-medium-q5_0", "whisper-large-v3-turbo-q5_0", "whisper-large-v3-q5_0"} <= names
           PY
 
       - name: Download upstream and apply HA patches

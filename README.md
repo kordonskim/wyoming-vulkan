@@ -14,6 +14,7 @@ Vulkan device initialization retain their existing behavior. HA tokens are suppl
 - `upstream.json`: the exact jdbridge source revision to download.
 - `patches/series`: the ordered patches to apply.
 - `patches/0001-home-assistant-vocabulary.patch`: the HA feature, tests, configuration and documentation.
+- `patches/0002-full-large-v3.patch`: adds full Large V3 Q5 to the model download catalog.
 - `scripts/prepare-source.py`: download upstream and apply the patch series to a new `.build/upstream` directory.
 - `scripts/fetch-models.sh`: deployment-compatible wrapper for the pinned upstream model downloader.
 - `.github/workflows/`: checks, tagged images, and proposed upstream revision updates.
@@ -56,11 +57,11 @@ Generated source is ignored by Git. The HA instructions and complete deployment 
 ## Deploy
 
 Existing init containers can continue cloning this repository and running `scripts/fetch-models.sh` directly.
-The wrapper downloads the model script from the revision in `upstream.json` and forwards all arguments; it does
-not need Python or a prepared source tree. It requires Bash, curl, sed and coreutils, matching the Alpine init
+The wrapper downloads the model script from the revision in `upstream.json`, applies the model catalog extension,
+and forwards all arguments. It does not need Python or a prepared source tree. It requires Bash, Git, curl, sed and coreutils, matching the Alpine init
 container packages below. The downloader verifies model checksums and reuses already downloaded models.
 
-For the Parakeet, Medium and Large V3 Turbo models shown in the Kubernetes deployment, use this init container
+For Parakeet, Medium, Large V3 Turbo and full Large V3 Q5, use this init container
 with the existing `data` volume. This downloads models only; it does not build or run the server image:
 
 ```yaml
@@ -72,7 +73,7 @@ initContainers:
       - |
         apk add --no-cache bash curl git coreutils ca-certificates
         git clone --depth 1 https://github.com/kordonskim/wyoming-vulkan.git /tmp/wyoming-vulkan
-        bash /tmp/wyoming-vulkan/scripts/fetch-models.sh -d /data/models parakeet-q8_0 whisper-medium-q5_0 whisper-large-v3-turbo-q5_0
+        bash /tmp/wyoming-vulkan/scripts/fetch-models.sh -d /data/models parakeet-q8_0 whisper-medium-q5_0 whisper-large-v3-turbo-q5_0 whisper-large-v3-q5_0
         mkdir -p /data/voices
     volumeMounts:
       - name: data
@@ -116,5 +117,40 @@ Make the token file readable by the container's configured user. Both environmen
 outside tracked source and Docker build context. Keep persistent models, tokens and deployment settings in a
 stable external directory when preparing newer builds; the preparation script never migrates or deletes them.
 
+## Full Large V3 alongside Turbo
+
+Full Large V3 Q5 downloads as `whisper/ggml-large-v3-q5_0.bin` (1,081,140,203 bytes, approximately 1.08 GB).
+The catalog pins the model revision and verifies its SHA-256. Download it with:
+
+```bash
+bash scripts/fetch-models.sh -d /data/models whisper-large-v3-q5_0
+```
+
+In Kubernetes, append `whisper-large-v3-q5_0` to your init container's existing download command, as above.
+Then append [this configuration fragment](examples/large-v3.config.toml) to the `config.toml` in your ConfigMap.
+It adds a separate full Large V3 model and endpoint on port **10314**, retaining your current Medium, Turbo
+and Parakeet configuration. Your existing image, including `v0.1.0`, can load this model; no image rebuild is needed.
+
+Also add the new port to the application container and its existing Kubernetes Service:
+
+```yaml
+# Add to containers[].ports:
+- name: whisper-full-v3
+  containerPort: 10314
+
+# Add to the Service's spec.ports:
+- name: whisper-full-v3
+  port: 10314
+  targetPort: whisper-full-v3
+  protocol: TCP
+```
+
+Reapply your manifests and restart the Deployment so the init container downloads the model and the mounted
+config is reloaded. Add the new endpoint to Home Assistant's Wyoming integration using the Service's reachable
+address and port 10314. If using a NodePort or another external mapping, use that published port instead.
+Select **Whisper Large V3 Q5** for speech-to-text in a voice assistant to compare with Turbo. Your existing
+`[hass]` configuration and token enable vocabulary biasing for the new model automatically.
+
 The generated README also documents separate Medium and Large V3 Turbo endpoints. No HA credentials are
-required to build or test an image.
+required to build or test an image. Full Large V3 uses more runtime memory and may take longer to transcribe
+than Turbo; model file size alone does not measure total GPU or system memory usage.

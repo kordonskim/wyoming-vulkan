@@ -1,0 +1,12 @@
+diff --git a/scripts/fetch-models.sh b/scripts/fetch-models.sh
+index bdacb15..ce26431 100755
+--- a/scripts/fetch-models.sh
++++ b/scripts/fetch-models.sh
+@@ -30,6 +30,7 @@ for w in "tiny.en 921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b
+          "small 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b 488MB" \
+          "small-q8_0 49c8fb02b65e6049d5fa6c04f81f53b867b5ec9540406812c643f177317f779f 264MB" \
+          "medium-q5_0 19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f 539MB" \
++         "large-v3-q5_0 d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1 1.08GB" \
+          "large-v3-turbo-q5_0 394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2 574MB" \
+          "large-v3-turbo-q8_0 317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1 874MB"; do
+   read -r name sha size <<<"$w"
