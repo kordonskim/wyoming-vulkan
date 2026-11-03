@@ -1,0 +1,61 @@
+name: Update from upstream
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: update-from-upstream
+  cancel-in-progress: false
+
+jobs:
+  update:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream into a review branch and open a PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/jdbridge/wyoming-vulkan.git
+          git fetch upstream main --no-tags
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo 'Already up to date with upstream.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          pending=$(gh pr list --base main --state open --json headRefName --jq '[.[] | select(.headRefName | startswith("codex/upstream-sync-"))] | length')
+          if [ "$pending" -gt 0 ]; then
+            echo 'An upstream update PR is already open. Merge or close it before retrying.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          branch="codex/upstream-sync-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git switch -c "$branch"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if ! git merge --no-edit upstream/main; then
+            echo 'Upstream conflicts with fork changes. Resolve the merge locally; main has not changed.' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          git push origin "HEAD:refs/heads/$branch"
+          cat > "$RUNNER_TEMP/upstream-pr.md" <<'BODY'
+          Merge the latest jdbridge/wyoming-vulkan main while preserving this fork's HA vocabulary support and image workflows.
+
+          Review the changes and check the manually dispatched Checks run on this branch before merging. Merging into main triggers a tested Docker image build with latest and commit tags. Real Vulkan GPU testing still requires a GPU host.
+          BODY
+          url=$(gh pr create --base main --head "$branch" --title 'Merge updates from jdbridge/wyoming-vulkan' --body-file "$RUNNER_TEMP/upstream-pr.md")
+          echo "Update PR: $url" >> "$GITHUB_STEP_SUMMARY"
+          # Explicit dispatch runs checks even when bot-created PR events require approval.
+          gh workflow run checks.yml --ref "$branch"

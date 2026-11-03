@@ -1,5 +1,7 @@
 # wyoming-vulkan
 
+Fork maintenance, upstream updates, and versioned Docker images: [FORK.md](FORK.md).
+
 Local speech-to-text and text-to-speech for [Home Assistant](https://www.home-assistant.io/)'s voice assistant, in one
 container, on the GPU you already have: the integrated graphics of a mini PC or NAS box that usually sits idle.
 
