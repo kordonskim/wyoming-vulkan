@@ -24,17 +24,19 @@ the workflow explicitly dispatches Checks as well.
 
 ## Release an image
 
-Main builds publish `latest` and `sha-<12-character commit>`. To publish a version for a tested commit:
+Main builds publish `latest`. To publish a short version tag for a tested commit:
 
 ```bash
-git tag -a v0.10.0-ha.1 -m "Home Assistant vocabulary biasing release 1"
-git push origin v0.10.0-ha.1
+git tag -a v0.1.0 -m "Home Assistant vocabulary biasing v0.1.0"
+git push origin v0.1.0
 ```
 
-This publishes `ghcr.io/kordonskim/wyoming-vulkan:0.10.0-ha.1` and its SHA tag after checks, without moving
+This publishes `ghcr.io/kordonskim/wyoming-vulkan:v0.1.0` after checks, without moving
 `latest`. Choose a new version for each release; do not move existing release tags. Pin the image tag in your
 deployment's `WYOMING_VULKAN_IMAGE`, or pin its registry digest for an exact image artifact. Release versions
 identify this build repository; the application's version still identifies the upstream software version.
+The next release can use `v0.1.1` or `v0.2.0`. The `v` prefix is preserved in image tags. Deployment is manual:
+building or publishing an image never changes your running containers.
 
 ## Change a patch
 
